@@ -1,10 +1,7 @@
 use anyhow::Result;
 use interprocess::local_socket::tokio::{prelude::*, Listener, Stream};
-use interprocess::local_socket::{
-	GenericFilePath, GenericNamespaced, ListenerOptions, ToFsName, ToNsName,
-};
-use iroh::Endpoint;
-use proto::{Request, Response};
+use interprocess::local_socket::ListenerOptions;
+use proto::{PeerStatus, Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::state::State;
@@ -12,6 +9,7 @@ use crate::state::State;
 #[cfg(windows)]
 fn build_listener() -> Result<Listener> {
 	use interprocess::os::windows::local_socket::ListenerOptionsExt;
+	use interprocess::local_socket::{GenericNamespaced, ToNsName};
 	use interprocess::os::windows::security_descriptor::{
 		AsSecurityDescriptorMutExt, SecurityDescriptor,
 	};
@@ -36,6 +34,7 @@ fn build_listener() -> Result<Listener> {
 
 #[cfg(unix)]
 fn build_listener() -> Result<Listener> {
+	use interprocess::local_socket::{GenericFilePath, ToFsName};
 	use std::os::unix::fs::PermissionsExt;
 
 	let raw = proto::socket_name();
@@ -51,7 +50,7 @@ fn build_listener() -> Result<Listener> {
 	Ok(listener)
 }
 
-pub async fn serve(endpoint: Endpoint, state: State) -> Result<()> {
+pub async fn serve(state: State) -> Result<()> {
 	let listener = build_listener()?;
 
 	loop {
@@ -62,17 +61,16 @@ pub async fn serve(endpoint: Endpoint, state: State) -> Result<()> {
 				continue;
 			}
 		};
-		let endpoint = endpoint.clone();
 		let state = state.clone();
 		tokio::spawn(async move {
-			if let Err(e) = handle(conn, endpoint, state).await {
+			if let Err(e) = handle(conn, state).await {
 				eprintln!("ipc request failed: {e}");
 			}
 		});
 	}
 }
 
-async fn handle(conn: Stream, endpoint: Endpoint, state: State) -> Result<()> {
+async fn handle(conn: Stream, state: State) -> Result<()> {
 	let mut recver = BufReader::new(&conn);
 	let mut sender = &conn;
 
@@ -80,74 +78,90 @@ async fn handle(conn: Stream, endpoint: Endpoint, state: State) -> Result<()> {
 	recver.read_line(&mut line).await?;
 
 	let req: Request = serde_json::from_str(line.trim())?;
-
-	let resp = match req {
-		Request::Ping { peer, msg } => {
-			match crate::connect::ping(&endpoint, &peer, msg.as_bytes()).await {
-				Ok(echo) => Response::Ok {
-					echo: String::from_utf8_lossy(&echo).to_string(),
-				},
-				Err(e) => Response::Error {
-					message: e.to_string(),
-				},
-			}
-		}
-		Request::Status => Response::Status {
-			endpoint_id: endpoint.id().to_string(),
-			peer_count: state.peer_count(),
-		},
-		Request::CreateNetwork { name } => {
-			match state.create_network(name, endpoint.id().to_string()).await {
-				Ok(()) => Response::Ok {
-					echo: "network created".to_string(),
-				},
-				Err(e) => Response::Error {
-					message: e.to_string(),
-				},
-			}
-		}
-		Request::Invite => {
-			if !state.is_coordinator(&endpoint.id().to_string()).await {
-				Response::Error {
-					message: "only the coordinator can invite".to_string(),
-				}
-			} else {
-				match state.generate_invite().await {
-					Ok(token) => Response::Invite {
-						code: format!("{}.{}", endpoint.id(), token),
-					},
-					Err(e) => Response::Error {
-						message: e.to_string(),
-					},
-				}
-			}
-		}
-		Request::Join { code } => match code.split_once('.') {
-			Some((coordinator_id, token)) => {
-				match crate::connect::join_network(&endpoint, coordinator_id, token).await {
-					Ok(name) => match state
-						.set_joined(coordinator_id.to_string(), endpoint.id().to_string(), name.clone())
-						.await
-					{
-						Ok(()) => Response::Joined { network_name: name },
-						Err(e) => Response::Error {
-							message: e.to_string(),
-						},
-					},
-					Err(e) => Response::Error {
-						message: e.to_string(),
-					},
-				}
-			}
-			None => Response::Error {
-				message: "invalid invite code".to_string(),
-			},
-		},
-	};
+	let resp = dispatch(req, &state).await;
 
 	let mut payload = serde_json::to_vec(&resp)?;
 	payload.push(b'\n');
 	sender.write_all(&payload).await?;
 
 	Ok(())
+}
+
+async fn dispatch(req: Request, state: &State) -> Response {
+	match req {
+		Request::Ping { peer } => match crate::connect::probe(state, &peer).await {
+			Ok(probe) => Response::Pong {
+				virtual_ip: probe.virtual_ip.to_string(),
+				rtt_ms: probe.rtt.map(|rtt| rtt.as_secs_f64() * 1000.0),
+			},
+			Err(e) => error(e),
+		},
+
+		Request::Status => {
+			let peers = state
+				.peers()
+				.snapshot()
+				.await
+				.into_iter()
+				.map(|(id, ip, linked)| PeerStatus {
+					id: id.to_string(),
+					virtual_ip: ip.to_string(),
+					linked,
+				})
+				.collect();
+
+			Response::Status {
+				endpoint_id: state.own_id().to_string(),
+				virtual_ip: state.virtual_ip().to_string(),
+				network: state.network_name().await,
+				coordinator: state.is_coordinator().await,
+				peers,
+			}
+		}
+
+		Request::CreateNetwork { name } => match state.create_network(name).await {
+			Ok(()) => Response::Ok {
+				echo: "network created".to_string(),
+			},
+			Err(e) => error(e),
+		},
+
+		Request::Invite => {
+			if !state.is_coordinator().await {
+				return Response::Error {
+					message: "only the coordinator can invite".to_string(),
+				};
+			}
+			match state.generate_invite().await {
+				Ok(code) => Response::Invite { code },
+				Err(e) => error(e),
+			}
+		}
+
+		Request::Join { code } => match crate::connect::join_network(state.endpoint(), &code).await {
+			Ok(admission) => {
+				let name = admission.network_name.clone();
+				match state
+					.set_joined(
+						admission.coordinator_id.to_string(),
+						admission.network_name,
+						admission.members,
+					)
+					.await
+				{
+					Ok(()) => Response::Joined { network_name: name },
+					Err(e) => error(e),
+				}
+			}
+			Err(e) => error(e),
+		},
+	}
+}
+
+/// Renders the whole context chain ("{:#}"), not just the outermost layer —
+/// a bare `connect` tells you nothing about why it failed.
+fn error(e: anyhow::Error) -> Response {
+	Response::Error {
+		message: format!("{e:#}"),
+	}
 }

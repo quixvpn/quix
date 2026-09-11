@@ -20,3 +20,5 @@ interprocess = { version = "2.4.4", features = ["tokio"] }
 hex = "0.4.3"
 serde = { workspace = true, features = ["derive"] }
 getrandom = "0.4.3"
+bs58 = "0.5.1"
+bytes = "1.12.1"

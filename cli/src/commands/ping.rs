@@ -4,22 +4,20 @@ use proto::{Request, Response};
 
 use super::client::send;
 
-/// Send a test message to a peer
+/// Probe a peer's mesh link, bringing one up if it isn't already.
 #[derive(Args)]
 pub struct PingArgs {
-	/// The endpoint id of the peer to ping
+	/// The endpoint id of the peer to probe
 	pub peer: String,
 }
 
 pub async fn run(args: PingArgs) -> Result<()> {
-	let req = Request::Ping {
-		peer: args.peer,
-		msg: "hello from quix".to_string(),
-	};
-
-	match send(req).await? {
-		Response::Ok { echo } => {
-			println!("echo: {echo}");
+	match send(Request::Ping { peer: args.peer }).await? {
+		Response::Pong { virtual_ip, rtt_ms } => {
+			match rtt_ms {
+				Some(rtt) => println!("{virtual_ip}  linked  rtt {rtt:.1}ms"),
+				None => println!("{virtual_ip}  linked"),
+			}
 			Ok(())
 		}
 		Response::Error { message } => anyhow::bail!("ping failed: {message}"),

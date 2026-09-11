@@ -3,8 +3,18 @@ use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
-pub const INTERFACE_NAME: &str = "quix";
+pub const DEFAULT_INTERFACE_NAME: &str = "quix";
 pub const PREFIX_LEN: u8 = 10;
+
+/// Overridable so two daemons can run on one host for testing, alongside the
+/// QUIX_KEY_PATH / QUIX_NETWORK_PATH / QUIX_SOCKET overrides.
+pub fn interface_name() -> String {
+	std::env::var("QUIX_IFACE").unwrap_or_else(|_| DEFAULT_INTERFACE_NAME.to_string())
+}
+
+/// Kept under the QUIC datagram limit on a normal 1500-byte path, so a full
+/// TUN frame fits in one datagram instead of being dropped as oversized.
+pub const MTU: u16 = 1280;
 
 /// Derives a stable virtual IPv4 address from a peer's public key,
 /// inside the CGNAT range 100.64.0.0/10.
@@ -18,12 +28,60 @@ pub fn virtual_ipv4(public_key: &[u8]) -> Ipv4Addr {
 	Ipv4Addr::from(BASE | (hash_u32 & HOST_MASK))
 }
 
+/// Reads the destination address out of an IPv4 packet, which is how we pick
+/// the peer to forward it to. Returns None for anything that isn't IPv4.
+pub fn dst_ipv4(packet: &[u8]) -> Option<Ipv4Addr> {
+	if packet.len() < 20 || packet[0] >> 4 != 4 {
+		return None;
+	}
+	Some(Ipv4Addr::new(
+		packet[16], packet[17], packet[18], packet[19],
+	))
+}
+
 /// Creates the "quix" TUN interface with the given virtual IP already assigned and up.
 pub fn create(virtual_ip: Ipv4Addr) -> Result<AsyncDevice> {
 	DeviceBuilder::new()
-		.name(INTERFACE_NAME)
+		.name(interface_name())
 		.ipv4(virtual_ip.to_string(), PREFIX_LEN, None)
-		.mtu(1400)
+		.mtu(MTU)
 		.build_async()
 		.context("creating TUN device (run as root?)")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn virtual_ip_is_stable_and_inside_the_cgnat_range() {
+		let key = [7u8; 32];
+		let ip = virtual_ipv4(&key);
+
+		assert_eq!(ip, virtual_ipv4(&key), "same key must give the same address");
+		assert_ne!(ip, virtual_ipv4(&[8u8; 32]));
+
+		// 100.64.0.0/10
+		let octets = ip.octets();
+		assert_eq!(octets[0], 100);
+		assert!((64..128).contains(&octets[1]), "got {ip}");
+	}
+
+	#[test]
+	fn dst_ipv4_reads_the_destination_field() {
+		let mut packet = [0u8; 20];
+		packet[0] = 0x45; // IPv4, 5-word header
+		packet[16..20].copy_from_slice(&[100, 64, 1, 2]);
+
+		assert_eq!(dst_ipv4(&packet), Some(Ipv4Addr::new(100, 64, 1, 2)));
+	}
+
+	#[test]
+	fn dst_ipv4_rejects_short_and_non_ipv4_packets() {
+		assert_eq!(dst_ipv4(&[0x45; 19]), None, "truncated header");
+
+		let mut v6 = [0u8; 40];
+		v6[0] = 0x60;
+		assert_eq!(dst_ipv4(&v6), None, "IPv6 has no IPv4 destination");
+	}
 }
