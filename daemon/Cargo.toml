@@ -14,7 +14,9 @@ tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 dirs = "7.0.0"
-rand = "0.10.2"
 tun-rs = { version = "2.8.9", features = ["async_tokio"] }
 sha2 = "0.11.0"
 interprocess = { version = "2.4.4", features = ["tokio"] }
+hex = "0.4.3"
+serde = { workspace = true, features = ["derive"] }
+getrandom = "0.4.3"

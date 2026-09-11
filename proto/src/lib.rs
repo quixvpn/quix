@@ -5,12 +5,17 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
 	Ping { peer: String, msg: String },
 	Status,
+	CreateNetwork { name: String },
+	Invite,
+	Join { code: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
 	Ok { echo: String },
 	Status { endpoint_id: String, peer_count: u64 },
+	Invite { code: String },
+	Joined { network_name: Option<String> },
 	Error { message: String },
 }
 

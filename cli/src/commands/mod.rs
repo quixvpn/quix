@@ -1,10 +1,11 @@
 mod client;
+mod create;
+mod invite;
+mod join;
 mod ping;
 mod status;
 
 use clap::{Parser, Subcommand};
-
-// this is the root command file
 
 #[derive(Parser)]
 #[command(name = "quix", about = "P2P mesh VPN over QUIC")]
@@ -15,9 +16,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Send a test message to a peer
+	/// Create a new network and become its coordinator
+	Create(create::CreateArgs),
+	/// Generate a one-time invite code (coordinator only)
+	Invite(invite::InviteArgs),
+	/// Join a network using an invite code
+	Join(join::JoinArgs),
+	/// Send a test message to a peer
 	Ping(ping::PingArgs),
-    /// Show the daemon's status
+	/// Show the daemon's status
 	Status(status::StatusArgs),
 }
 
@@ -25,6 +32,9 @@ pub async fn run() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 
 	match cli.command {
+		Command::Create(args) => create::run(args).await,
+		Command::Invite(args) => invite::run(args).await,
+		Command::Join(args) => join::run(args).await,
 		Command::Ping(args) => ping::run(args).await,
 		Command::Status(args) => status::run(args).await,
 	}

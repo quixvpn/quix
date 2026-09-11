@@ -75,6 +75,39 @@ async fn handle(conn: Stream, endpoint: Endpoint, state: State) -> Result<()> {
 			endpoint_id: endpoint.id().to_string(),
 			peer_count: state.peer_count(),
 		},
+        Request::CreateNetwork { name } => {
+            match state.create_network(name, endpoint.id().to_string()).await {
+                Ok(()) => Response::Ok { echo: "network created".to_string() },
+                Err(e) => Response::Error { message: e.to_string() },
+            }
+        }
+        Request::Invite => {
+            if !state.is_coordinator(&endpoint.id().to_string()).await {
+                Response::Error { message: "only the coordinator can invite".to_string() }
+            } else {
+                match state.generate_invite().await {
+                    Ok(token) => Response::Invite {
+                        code: format!("{}.{}", endpoint.id(), token),
+                    },
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
+        }
+        Request::Join { code } => match code.split_once('.') {
+            Some((coordinator_id, token)) => {
+                match crate::connect::join_network(&endpoint, coordinator_id, token).await {
+                    Ok(name) => match state
+                        .set_joined(coordinator_id.to_string(), endpoint.id().to_string(), name.clone())
+                        .await
+                    {
+                        Ok(()) => Response::Joined { network_name: name },
+                        Err(e) => Response::Error { message: e.to_string() },
+                    },
+                    Err(e) => Response::Error { message: e.to_string() },
+                }
+            }
+            None => Response::Error { message: "invalid invite code".to_string() },
+        },
 	};
 
 	let mut payload = serde_json::to_vec(&resp)?;

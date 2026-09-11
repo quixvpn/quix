@@ -22,7 +22,7 @@ pub async fn run(args: PingArgs) -> Result<()> {
 			println!("echo: {echo}");
 			Ok(())
 		}
-		Response::Status { .. } => anyhow::bail!("unexpected status response to ping"),
 		Response::Error { message } => anyhow::bail!("ping failed: {message}"),
+		_ => anyhow::bail!("unexpected response"),
 	}
 }

@@ -18,7 +18,7 @@ pub async fn run(_args: StatusArgs) -> Result<()> {
 			println!("Connected Peers: {peer_count}");
 			Ok(())
 		}
-		Response::Ok { .. } => anyhow::bail!("unexpected ok response to status"),
 		Response::Error { message } => anyhow::bail!("status failed: {message}"),
+		_ => anyhow::bail!("unexpected response"),
 	}
 }
