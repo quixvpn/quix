@@ -13,3 +13,5 @@ iroh.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+dirs = "7.0.0"
+rand = "0.10.2"
