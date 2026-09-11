@@ -28,8 +28,8 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 				Some(name) => println!("network  {name}  ({role})"),
 				None => println!("network  none — run `quix create <name>` or `quix join <code>`"),
 			}
-			println!("address  {v6}");
-			println!("         {v4}");
+			println!("IPv4 ----  {v4}");
+			println!("IPv6 ----  {v6}");
 			if args.verbose {
 				println!("id       {endpoint_id}");
 			}
