@@ -9,6 +9,9 @@ use tokio::sync::RwLock;
 
 use crate::tun::virtual_addrs;
 
+/// Close code sent to peers when we leave their network.
+const CLOSE_LEFT: u32 = 3;
+
 /// The mesh's forwarding state: which overlay address belongs to which peer,
 /// and which of those peers we currently hold a live connection to.
 ///
@@ -66,6 +69,14 @@ impl Peers {
 		self.inner.write().await.links.remove(id);
 	}
 
+	/// Closes every link. Each peer's read loop sees the close and unregisters,
+	/// but we drain here so nothing is handed out in the meantime.
+	pub async fn close_all(&self) {
+		for (_, conn) in self.inner.write().await.links.drain() {
+			conn.close(CLOSE_LEFT.into(), b"left the network");
+		}
+	}
+
 	pub async fn route(&self, dst: IpAddr) -> Option<EndpointId> {
 		self.inner.read().await.routes.get(&dst).copied()
 	}
@@ -95,11 +106,13 @@ impl Peers {
 
 		let mut rows: HashMap<EndpointId, PeerRow> = HashMap::new();
 		for (addr, id) in &inner.routes {
+			let link = inner.links.get(id);
 			let row = rows.entry(*id).or_insert_with(|| PeerRow {
 				id: *id,
 				v4: Ipv4Addr::UNSPECIFIED,
 				v6: Ipv6Addr::UNSPECIFIED,
-				linked: inner.links.contains_key(id),
+				linked: link.is_some(),
+				datagram_max: link.and_then(|conn| conn.max_datagram_size()),
 			});
 			match addr {
 				IpAddr::V4(v4) => row.v4 = *v4,
@@ -119,6 +132,7 @@ pub struct PeerRow {
 	pub v4: Ipv4Addr,
 	pub v6: Ipv6Addr,
 	pub linked: bool,
+	pub datagram_max: Option<usize>,
 }
 
 #[cfg(test)]

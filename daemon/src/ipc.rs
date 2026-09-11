@@ -4,6 +4,7 @@ use interprocess::local_socket::ListenerOptions;
 use proto::{PeerStatus, Request, Response, Traffic};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::authz::{self, Caller};
 use crate::state::State;
 
 #[cfg(windows)]
@@ -38,6 +39,12 @@ fn build_listener() -> Result<Listener> {
 	use std::os::unix::fs::PermissionsExt;
 
 	let raw = proto::socket_name();
+	// /run is a tmpfs, so our directory is gone after every boot. systemd's
+	// RuntimeDirectory= also makes it, but the daemon has to work when run
+	// straight from a build tree too.
+	if let Some(parent) = std::path::Path::new(&raw).parent() {
+		std::fs::create_dir_all(parent)?;
+	}
 	let _ = std::fs::remove_file(&raw);
 	let name = raw.clone().to_fs_name::<GenericFilePath>()?;
 
@@ -78,7 +85,16 @@ async fn handle(conn: Stream, state: State) -> Result<()> {
 	recver.read_line(&mut line).await?;
 
 	let req: Request = serde_json::from_str(line.trim())?;
-	let resp = dispatch(req, &state).await;
+
+	// The kernel tells us who is connected; the client never gets to claim it.
+	let caller = Caller::of(&conn);
+	let resp = match authz::check(&req, &caller, state.operator_uid().await) {
+		Ok(()) => dispatch(req, &state).await,
+		Err(message) => {
+			eprintln!("refused {req:?} from {}", caller.describe());
+			Response::Error { message }
+		}
+	};
 
 	let mut payload = serde_json::to_vec(&resp)?;
 	payload.push(b'\n');
@@ -109,6 +125,7 @@ async fn dispatch(req: Request, state: &State) -> Response {
 					v6: row.v6.to_string(),
 					v4: row.v4.to_string(),
 					linked: row.linked,
+					datagram_max: row.datagram_max.map(|max| max as u32),
 				})
 				.collect();
 
@@ -150,6 +167,41 @@ async fn dispatch(req: Request, state: &State) -> Response {
 			}
 			match state.generate_invite().await {
 				Ok(code) => Response::Invite { code },
+				Err(e) => error(e),
+			}
+		}
+
+		Request::SetOperator { user } => match authz::resolve_user(&user) {
+			Ok(uid) => match state.set_operator(user.clone(), uid).await {
+				Ok(()) => Response::OperatorSet { user, uid },
+				Err(e) => error(e),
+			},
+			Err(message) => Response::Error { message },
+		},
+
+		Request::Leave => {
+			// Tell the coordinator while we still know who it is. Best-effort:
+			// if they're offline we still leave locally, and their roster
+			// catches up when they next see us refuse a link.
+			let coordinator = state.coordinator_id().await;
+			let own_id = state.own_id().to_string();
+			let mut coordinator_notified = false;
+
+			if let Some(id) = coordinator.filter(|id| *id != own_id) {
+				match id.parse() {
+					Ok(id) => match crate::connect::notify_leave(state.endpoint(), id).await {
+						Ok(()) => coordinator_notified = true,
+						Err(e) => eprintln!("telling the coordinator we left failed: {e:#}"),
+					},
+					Err(e) => eprintln!("stored coordinator id is unusable: {e}"),
+				}
+			}
+
+			match state.leave().await {
+				Ok(network_name) => Response::Left {
+					network_name,
+					coordinator_notified,
+				},
 				Err(e) => error(e),
 			}
 		}

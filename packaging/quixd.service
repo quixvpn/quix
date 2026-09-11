@@ -1,0 +1,40 @@
+[Unit]
+Description=Quix P2P mesh VPN daemon
+Documentation=https://github.com/quixvpn/quix
+# The TUN device and its routes need the network stack up, and iroh needs DNS
+# to resolve relays and publish our address.
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/quixd
+Restart=on-failure
+RestartSec=5s
+
+# State lives outside any user's home: the daemon runs as root, and writing to
+# ~/.config leaves root-owned files in the installing user's directory.
+Environment=QUIX_KEY_PATH=/var/lib/quix/key
+Environment=QUIX_NETWORK_PATH=/var/lib/quix/network.json
+Environment=QUIX_SOCKET=/run/quix/quixd.sock
+StateDirectory=quix
+StateDirectoryMode=0700
+RuntimeDirectory=quix
+RuntimeDirectoryMode=0755
+
+# Creating a TUN device and installing routes is all this needs; it does not
+# need the rest of root.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

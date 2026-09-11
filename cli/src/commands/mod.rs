@@ -2,6 +2,8 @@ mod client;
 mod create;
 mod invite;
 mod join;
+mod leave;
+mod operator;
 mod ping;
 mod status;
 
@@ -22,10 +24,14 @@ pub enum Command {
 	Invite(invite::InviteArgs),
 	/// Join a network using an invite code
 	Join(join::JoinArgs),
+	/// Leave the current network
+	Leave(leave::LeaveArgs),
 	/// Send a test message to a peer
 	Ping(ping::PingArgs),
 	/// Show the daemon's status
 	Status(status::StatusArgs),
+	/// Let a local user run mutating commands without sudo (root only)
+	SetOperator(operator::SetOperatorArgs),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -35,7 +41,9 @@ pub async fn run() -> anyhow::Result<()> {
 		Command::Create(args) => create::run(args).await,
 		Command::Invite(args) => invite::run(args).await,
 		Command::Join(args) => join::run(args).await,
+		Command::Leave(args) => leave::run(args).await,
 		Command::Ping(args) => ping::run(args).await,
 		Command::Status(args) => status::run(args).await,
+		Command::SetOperator(args) => operator::run(args).await,
 	}
 }

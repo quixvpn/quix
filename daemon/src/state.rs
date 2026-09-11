@@ -10,6 +10,7 @@ use tun_rs::AsyncDevice;
 use crate::membership::Membership;
 use crate::peers::Peers;
 use crate::routes::Routes;
+use crate::settings::Settings;
 use crate::stats::Stats;
 
 #[derive(Clone)]
@@ -17,6 +18,7 @@ pub struct State {
 	endpoint: Endpoint,
 	pub tun: Arc<AsyncDevice>,
 	membership: Arc<Mutex<Membership>>,
+	settings: Arc<Mutex<Settings>>,
 	peers: Peers,
 	routes: Routes,
 	stats: Stats,
@@ -39,6 +41,7 @@ impl State {
 			endpoint,
 			tun: Arc::new(tun),
 			membership: Arc::new(Mutex::new(Membership::load()?)),
+			settings: Arc::new(Mutex::new(Settings::load()?)),
 			peers: Peers::default(),
 			routes: Routes::new(crate::tun::interface_name()),
 			stats: Stats::default(),
@@ -141,6 +144,43 @@ impl State {
 		drop(m);
 		self.refresh_routes().await;
 		Ok(())
+	}
+
+	/// Leaves the network: forgets the roster, tears down the routes it put in
+	/// the system table, and drops every link. Returns the network's name.
+	pub async fn leave(&self) -> Result<Option<String>> {
+		let mut m = self.membership.lock().await;
+		let name = m.network_name.clone();
+		m.leave();
+		m.save()?;
+		drop(m);
+
+		self.refresh_routes().await;
+		self.peers.close_all().await;
+		Ok(name)
+	}
+
+	/// Coordinator side of a member leaving.
+	pub async fn remove_member(&self, id: &str) -> Result<bool> {
+		let mut m = self.membership.lock().await;
+		if !m.remove_member(id) {
+			return Ok(false);
+		}
+		m.save()?;
+		drop(m);
+		self.refresh_routes().await;
+		Ok(true)
+	}
+
+	pub async fn operator_uid(&self) -> Option<u32> {
+		self.settings.lock().await.operator_uid
+	}
+
+	pub async fn set_operator(&self, name: String, uid: u32) -> Result<()> {
+		let mut settings = self.settings.lock().await;
+		settings.operator_uid = Some(uid);
+		settings.operator_name = Some(name);
+		settings.save()
 	}
 
 	pub async fn is_member(&self, id: &str) -> bool {

@@ -1,4 +1,5 @@
 mod admin;
+mod authz;
 mod connect;
 mod handler;
 mod identity;
@@ -7,9 +8,14 @@ mod membership;
 mod mesh;
 mod peers;
 mod routes;
+#[cfg(windows)]
+mod service;
+mod settings;
 mod state;
 mod stats;
 mod tun;
+
+use std::future::Future;
 
 use admin::{AdminHandler, ADMIN_ALPN};
 use anyhow::Result;
@@ -28,8 +34,29 @@ const DIAL_QUEUE: usize = 64;
 /// How long to wait for a relay at startup before carrying on regardless.
 const ONLINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+	// Started by the Service Control Manager? Then it owns our lifecycle. The
+	// dispatcher only connects inside a real service process, so a failure here
+	// means we were launched from a terminal instead.
+	#[cfg(windows)]
+	if service::run() {
+		return Ok(());
+	}
+
+	runtime()?.block_on(run(async {
+		let _ = tokio::signal::ctrl_c().await;
+		println!("interrupted");
+	}))
+}
+
+pub fn runtime() -> Result<tokio::runtime::Runtime> {
+	Ok(tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.build()?)
+}
+
+/// Runs the daemon until `shutdown` resolves.
+pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	let secret_key = identity::load_or_create()?;
 
 	let endpoint = Endpoint::builder(presets::N0)
@@ -79,8 +106,14 @@ async fn main() -> Result<()> {
 	tokio::spawn(mesh::tun_to_mesh(state.clone()));
 	tokio::spawn(mesh::dialer(state.clone(), dial_rx));
 
-	ipc::serve(state).await?;
+	let result = tokio::select! {
+		served = ipc::serve(state) => served,
+		() = shutdown => {
+			println!("stopping");
+			Ok(())
+		}
+	};
 
 	router.shutdown().await?;
-	Ok(())
+	result
 }

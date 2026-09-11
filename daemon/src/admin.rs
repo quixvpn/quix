@@ -13,6 +13,8 @@ pub const ADMIN_ALPN: &[u8] = b"quix-admin/0";
 pub enum AdminRequest {
 	/// Joiner → coordinator: redeem an invite token.
 	Join { token_hex: String },
+	/// Member → coordinator: remove me from the roster.
+	Leave,
 	/// Coordinator → member: the roster has changed, here is the new one.
 	Roster {
 		network_name: Option<String>,
@@ -64,6 +66,7 @@ impl AdminHandler {
 	async fn dispatch(&self, req: AdminRequest, requester: String) -> AdminResponse {
 		match req {
 			AdminRequest::Join { token_hex } => self.join(token_hex, requester).await,
+			AdminRequest::Leave => self.leave(requester).await,
 			AdminRequest::Roster {
 				network_name,
 				members,
@@ -94,6 +97,29 @@ impl AdminHandler {
 			Ok(None) => AdminResponse::Error {
 				message: "invalid or already used invite".to_string(),
 			},
+			Err(e) => AdminResponse::Error {
+				message: e.to_string(),
+			},
+		}
+	}
+
+	async fn leave(&self, requester: String) -> AdminResponse {
+		if !self.state.is_coordinator().await {
+			return AdminResponse::Error {
+				message: "only the coordinator maintains the roster".to_string(),
+			};
+		}
+
+		match self.state.remove_member(&requester).await {
+			// Already gone is the state they asked for, so not an error.
+			Ok(false) => AdminResponse::Ack,
+			Ok(true) => {
+				println!("member left: {requester}");
+				let network_name = self.state.network_name().await;
+				let roster = self.state.roster().await;
+				self.broadcast_roster(&requester, network_name, roster);
+				AdminResponse::Ack
+			}
 			Err(e) => AdminResponse::Error {
 				message: e.to_string(),
 			},

@@ -123,6 +123,16 @@ pub async fn join_network(endpoint: &Endpoint, code: &str) -> Result<Admission> 
 	}
 }
 
+/// Member → coordinator: ask to be dropped from the roster, so the rest of the
+/// network stops dialing us.
+pub async fn notify_leave(endpoint: &Endpoint, coordinator: EndpointId) -> Result<()> {
+	match admin_call(endpoint, coordinator, AdminRequest::Leave).await? {
+		AdminResponse::Ack => Ok(()),
+		AdminResponse::Error { message } => anyhow::bail!(message),
+		AdminResponse::Joined { .. } => anyhow::bail!("unexpected response to leave"),
+	}
+}
+
 /// Coordinator → member: publish an updated roster.
 pub async fn push_roster(
 	endpoint: &Endpoint,

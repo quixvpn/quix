@@ -147,6 +147,20 @@ impl Membership {
 		}
 	}
 
+	/// Forgets the network entirely. Invites are dropped too — they are only
+	/// meaningful while we are the coordinator of this network.
+	pub fn leave(&mut self) {
+		self.network_name = None;
+		self.coordinator_id = None;
+		self.members.clear();
+		self.pending_invites.clear();
+	}
+
+	/// Coordinator side of someone leaving. Returns whether they were listed.
+	pub fn remove_member(&mut self, id: &str) -> bool {
+		self.members.remove(id)
+	}
+
 	pub fn is_member(&self, id: &str) -> bool {
 		self.members.contains(id)
 	}

@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Backtraces on a CI failure cost nothing and save a re-run.
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+  build:
+    name: build ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          # Native ARM runner rather than cross-compiling: ring and aws-lc-rs
+          # both build C, and a native build avoids the whole toolchain dance.
+          # Free for public repos; swap to ubuntu-latest plus
+          # gcc-aarch64-linux-gnu if this repo is private.
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: build
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      # Both binaries plus everything needed to install them, so the artifact
+      # is self-contained and install.sh has no repo to clone.
+      - name: package (linux)
+        if: runner.os == 'Linux'
+        run: |
+          staging="quix-${{ matrix.name }}"
+          mkdir -p "$staging"
+          cp target/${{ matrix.target }}/release/quix target/${{ matrix.target }}/release/quixd "$staging/"
+          cp packaging/quixd.service scripts/install.sh "$staging/"
+          tar -czf "$staging.tar.gz" "$staging"
+          sha256sum "$staging.tar.gz" > "$staging.tar.gz.sha256"
+
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "quix-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/quix.exe","target/${{ matrix.target }}/release/quixd.exe" $staging
+          Copy-Item "scripts/install.ps1" $staging
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower() + "  $staging.zip" |
+            Out-File -Encoding ascii "$staging.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quix-${{ matrix.name }}
+          path: |
+            quix-${{ matrix.name }}.tar.gz*
+            quix-${{ matrix.name }}.zip*
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+            *.sha256
+          generate_release_notes: true
