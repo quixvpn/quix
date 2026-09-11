@@ -17,12 +17,15 @@ pub async fn run(args: PingArgs) -> Result<()> {
 	};
 
 	match send(req).await? {
-		Response::Ok { echo } => {
-			println!("echo: {echo}");
-			Ok(())
-		}
-		Response::Error { message } => anyhow::bail!("ping failed: {message}"),
+	Response::Ok { echo } => {
+		println!("echo: {echo}");
+		Ok(())
 	}
+	Response::Status { .. } => {
+		anyhow::bail!("unexpected status response to ping")
+	}
+	Response::Error { message } => anyhow::bail!("ping failed: {message}"),
+}
 }
 
 async fn send(req: Request) -> Result<Response> {

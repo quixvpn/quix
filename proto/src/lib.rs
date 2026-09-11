@@ -5,11 +5,13 @@ use std::path::PathBuf;
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum Request {
 	Ping { peer: String, msg: String },
+	Status,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
 	Ok { echo: String },
+	Status { endpoint_id: String, peer_count: u64 },
 	Error { message: String },
 }
 

@@ -5,7 +5,9 @@ use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-pub async fn serve(endpoint: Endpoint) -> Result<()> {
+use crate::state::State;
+
+pub async fn serve(endpoint: Endpoint, state: State) -> Result<()> {
 	let path = proto::socket_path();
 	let _ = std::fs::remove_file(&path); // clean up a stale socket from a previous run
 
@@ -15,15 +17,16 @@ pub async fn serve(endpoint: Endpoint) -> Result<()> {
 	loop {
 		let (stream, _) = listener.accept().await?;
 		let endpoint = endpoint.clone();
+		let state = state.clone();
 		tokio::spawn(async move {
-			if let Err(e) = handle(stream, endpoint).await {
+			if let Err(e) = handle(stream, endpoint, state).await {
 				eprintln!("ipc request failed: {e}");
 			}
 		});
 	}
 }
 
-async fn handle(mut stream: UnixStream, endpoint: Endpoint) -> Result<()> {
+async fn handle(mut stream: UnixStream, endpoint: Endpoint, state: State) -> Result<()> {
 	let mut buf = Vec::new();
 	stream.read_to_end(&mut buf).await?;
 
@@ -40,6 +43,10 @@ async fn handle(mut stream: UnixStream, endpoint: Endpoint) -> Result<()> {
 				},
 			}
 		}
+		Request::Status => Response::Status {
+			endpoint_id: endpoint.id().to_string(),
+			peer_count: state.peer_count(),
+		},
 	};
 
 	let payload = serde_json::to_vec(&resp)?;

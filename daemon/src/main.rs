@@ -2,6 +2,7 @@ mod connect;
 mod handler;
 mod identity;
 mod ipc;
+mod state;
 
 use anyhow::Result;
 use iroh::Endpoint;
@@ -9,6 +10,7 @@ use iroh::endpoint::presets;
 use iroh::protocol::Router;
 
 use handler::Echo;
+use state::State;
 
 pub const ALPN: &[u8] = b"quix-vpn/0";
 
@@ -23,11 +25,13 @@ async fn main() -> Result<()> {
 
 	println!("quixd listening, id: {}", endpoint.id());
 
-	let router = Router::builder(endpoint.clone())
-		.accept(ALPN, Echo)
-		.spawn();
+    let state = State::default();
 
-	ipc::serve(endpoint).await?; // blocks, serving CLI commands
+	let router = Router::builder(endpoint.clone())
+        .accept(ALPN, Echo { state: state.clone() })
+        .spawn();
+
+	ipc::serve(endpoint, state).await?; // blocks, serving CLI commands
 
 	router.shutdown().await?;
 	Ok(())
