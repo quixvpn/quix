@@ -1,6 +1,10 @@
+mod client;
 mod ping;
+mod status;
 
 use clap::{Parser, Subcommand};
+
+// this is the root command file
 
 #[derive(Parser)]
 #[command(name = "quix", about = "P2P mesh VPN over QUIC")]
@@ -13,6 +17,8 @@ pub struct Cli {
 pub enum Command {
     /// Send a test message to a peer
 	Ping(ping::PingArgs),
+    /// Show the daemon's status
+	Status(status::StatusArgs),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -20,5 +26,6 @@ pub async fn run() -> anyhow::Result<()> {
 
 	match cli.command {
 		Command::Ping(args) => ping::run(args).await,
+		Command::Status(args) => status::run(args).await,
 	}
 }
