@@ -15,15 +15,15 @@ pub async fn run(_args: LeaveArgs) -> Result<()> {
 			coordinator_notified,
 		} => {
 			match network_name {
-				Some(name) => println!("left {name}"),
-				None => println!("not a member of any network"),
+				Some(name) => println!("Sucessfully left {name}."),
+				None => println!("Not a member of any network!"),
 			}
 			if !coordinator_notified {
-				println!("note: the coordinator could not be reached, so it may still list you");
+				println!("NOTE: The coordinator could not be reached, so it may still list you.");
 			}
 			Ok(())
 		}
-		Response::Error { message } => anyhow::bail!("leave failed: {message}"),
-		_ => anyhow::bail!("unexpected response"),
+		Response::Error { message } => anyhow::bail!("Leave failed: {message}"),
+		_ => anyhow::bail!("Unexpected response."),
 	}
 }
