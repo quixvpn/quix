@@ -5,7 +5,7 @@ use interprocess::local_socket::{
 };
 use iroh::Endpoint;
 use proto::{Request, Response};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::state::State;
 
@@ -13,35 +13,52 @@ fn build_listener() -> Result<Listener> {
 	let raw = proto::socket_name();
 
 	let name = if cfg!(windows) {
-		raw.to_ns_name::<GenericNamespaced>()?
+		raw.clone().to_ns_name::<GenericNamespaced>()?
 	} else {
-		let _ = std::fs::remove_file(&raw); // clean up a stale socket file
-		raw.to_fs_name::<GenericFilePath>()?
+		let _ = std::fs::remove_file(&raw);
+		raw.clone().to_fs_name::<GenericFilePath>()?
 	};
 
-	Ok(ListenerOptions::new().name(name).create_tokio()?)
+	let listener = ListenerOptions::new().name(name).create_tokio()?;
+
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		std::fs::set_permissions(&raw, std::fs::Permissions::from_mode(0o666))?;
+	}
+
+	Ok(listener)
 }
 
 pub async fn serve(endpoint: Endpoint, state: State) -> Result<()> {
 	let listener = build_listener()?;
 
 	loop {
-		let stream = listener.accept().await?;
+		let conn = match listener.accept().await {
+			Ok(c) => c,
+			Err(e) => {
+				eprintln!("incoming ipc connection error: {e}");
+				continue;
+			}
+		};
 		let endpoint = endpoint.clone();
 		let state = state.clone();
 		tokio::spawn(async move {
-			if let Err(e) = handle(stream, endpoint, state).await {
+			if let Err(e) = handle(conn, endpoint, state).await {
 				eprintln!("ipc request failed: {e}");
 			}
 		});
 	}
 }
 
-async fn handle(mut stream: Stream, endpoint: Endpoint, state: State) -> Result<()> {
-	let mut buf = Vec::new();
-	stream.read_to_end(&mut buf).await?;
+async fn handle(conn: Stream, endpoint: Endpoint, state: State) -> Result<()> {
+	let mut recver = BufReader::new(&conn);
+	let mut sender = &conn;
 
-	let req: Request = serde_json::from_slice(&buf)?;
+	let mut line = String::new();
+	recver.read_line(&mut line).await?;
+
+	let req: Request = serde_json::from_str(line.trim())?;
 
 	let resp = match req {
 		Request::Ping { peer, msg } => {
@@ -60,8 +77,9 @@ async fn handle(mut stream: Stream, endpoint: Endpoint, state: State) -> Result<
 		},
 	};
 
-	let payload = serde_json::to_vec(&resp)?;
-	stream.write_all(&payload).await?;
+	let mut payload = serde_json::to_vec(&resp)?;
+	payload.push(b'\n');
+	sender.write_all(&payload).await?;
 
 	Ok(())
 }

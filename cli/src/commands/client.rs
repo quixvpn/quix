@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use interprocess::local_socket::tokio::{prelude::*, Stream};
 use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ToFsName, ToNsName};
 use proto::{Request, Response};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub async fn send(req: Request) -> Result<Response> {
 	let raw = proto::socket_name();
@@ -13,16 +13,19 @@ pub async fn send(req: Request) -> Result<Response> {
 		raw.to_fs_name::<GenericFilePath>()?
 	};
 
-	let mut stream = Stream::connect(name)
+	let conn = Stream::connect(name)
 		.await
 		.context("is quixd running?")?;
 
-	let payload = serde_json::to_vec(&req)?;
-	stream.write_all(&payload).await?;
-	stream.shutdown().await?;
+	let mut recver = BufReader::new(&conn);
+	let mut sender = &conn;
 
-	let mut buf = Vec::new();
-	stream.read_to_end(&mut buf).await?;
+	let mut payload = serde_json::to_vec(&req)?;
+	payload.push(b'\n');
+	sender.write_all(&payload).await?;
 
-	Ok(serde_json::from_slice(&buf)?)
+	let mut line = String::new();
+	recver.read_line(&mut line).await?;
+
+	Ok(serde_json::from_str(line.trim())?)
 }
