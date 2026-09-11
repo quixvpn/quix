@@ -161,6 +161,13 @@ pub async fn dialer(state: State, mut requests: mpsc::Receiver<EndpointId>) {
 		};
 
 		for id in targets {
+			// Exactly one side of each pair dials. Without this both dial at
+			// once, each rejects the other's connection as a duplicate, and
+			// both tear down before reconnecting — a visible flap on every
+			// startup. Comparing ids is a rule both ends compute identically.
+			if state.own_id() > id {
+				continue;
+			}
 			if state.peers().link(&id).await.is_some() {
 				continue;
 			}
