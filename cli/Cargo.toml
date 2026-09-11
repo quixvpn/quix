@@ -1,0 +1,14 @@
+[package]
+name = "quix-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "quix"
+path = "src/main.rs"
+
+[dependencies]
+proto = { path = "../proto" }
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true
+anyhow.workspace = true

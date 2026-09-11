@@ -1,0 +1,15 @@
+[package]
+name = "quix-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "quixd"
+path = "src/main.rs"
+
+[dependencies]
+proto = { path = "../proto" }
+iroh.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
