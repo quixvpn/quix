@@ -16,6 +16,7 @@ RestartSec=5s
 # ~/.config leaves root-owned files in the installing user's directory.
 Environment=QUIX_KEY_PATH=/var/lib/quix/key
 Environment=QUIX_NETWORK_PATH=/var/lib/quix/network.json
+Environment=QUIX_SETTINGS_PATH=/var/lib/quix/settings.json
 Environment=QUIX_SOCKET=/run/quix/quixd.sock
 StateDirectory=quix
 StateDirectoryMode=0700

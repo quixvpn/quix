@@ -59,7 +59,7 @@ impl Membership {
 			Ok(data) => serde_json::from_str(&data)
 				.with_context(|| format!("parse {}", path.display())),
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-			Err(e) => Err(e.into()),
+			Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
 		}
 	}
 

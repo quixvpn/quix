@@ -28,6 +28,26 @@ enforces on the interface), and QUIC only guarantees a 1200-byte packet, which
 measures out to 1162 bytes of datagram payload. The two bounds genuinely
 overlap; PMTU discovery is what normally resolves it.
 
+### 2. One state-directory variable instead of one per file
+
+`v0.1.0` shipped broken because the systemd unit named `QUIX_KEY_PATH` and
+`QUIX_NETWORK_PATH` but not `QUIX_SETTINGS_PATH`, added later. The daemon fell
+back to `dirs::config_dir()` — `/root/.config` — which `ProtectHome=yes` makes
+unreadable, so it exited with a bare `Permission denied` on every start.
+
+Three variables means every new state file is a chance to forget one, in two
+places (the unit and the Windows service's registry `Environment` key). A single
+`QUIX_STATE_DIR` that the individual paths derive from removes the whole class,
+with the per-file overrides kept for tests.
+
+### 3. A clearer error when the TUN name is taken
+
+`Device or resource busy (os error 16)` is what you get when another quixd
+already holds the interface — the normal case for anyone who ran from a build
+tree before installing. It should name the cause and the fix. `tun-rs` also has
+`reuse_dev`, so adopting an orphaned interface with no process behind it is
+possible, though taking one over while another daemon holds it would be wrong.
+
 ---
 
 ## Soon after

@@ -115,7 +115,8 @@ try {
         -Type MultiString `
         -Value @(
             "QUIX_KEY_PATH=$stateDir\key",
-            "QUIX_NETWORK_PATH=$stateDir\network.json"
+            "QUIX_NETWORK_PATH=$stateDir\network.json",
+            "QUIX_SETTINGS_PATH=$stateDir\settings.json"
         )
 
     # Come back automatically after a crash, matching Restart=on-failure on Linux.
