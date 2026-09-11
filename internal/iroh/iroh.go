@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	irohlib "git.coopcloud.tech/decentral1se/iroh-go"
 	"github.com/quixvpn/quix/internal/identity"
@@ -61,7 +62,8 @@ func AcceptLoop(endpoint *irohlib.Endpoint) {
 
 		accepting, err := (*incoming).Accept()
 		if err != nil {
-			log.Printf("accept failed: %v", err)
+			log.Printf("accept failed: %v", irohlib.As(err))
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
