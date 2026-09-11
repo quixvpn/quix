@@ -11,6 +11,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use bytes::Bytes;
 use iroh::endpoint::{presets, Connection};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::Endpoint;
@@ -20,7 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Mirrors `tun::MTU`. Duplicated because the daemon is a bin-only crate, so
 /// an example can't import from it — keep the two in step.
-const TUN_MTU: u16 = 1150;
+const TUN_MTU: u16 = 1280;
 
 #[derive(Debug, Clone)]
 struct Accept;
@@ -63,18 +64,31 @@ async fn main() -> Result<()> {
 			// The mesh forwards each IP packet as one QUIC datagram, so a TUN
 			// MTU above this limit means full-size packets are silently dropped
 			// while small ones (a ping) sail through.
-			match conn.max_datagram_size() {
-				Some(max) => {
-					println!("\nmax datagram: {max} bytes   TUN MTU: {}", TUN_MTU);
-					if (TUN_MTU as usize) > max {
-						println!(
-							"✗ MTU is {} bytes over the limit — full-size packets will be dropped",
-							TUN_MTU as usize - max
-						);
-					} else {
-						println!("✓ a full-size packet fits in one datagram");
-					}
+			// A fresh link starts at QUIC's guaranteed 1200-byte packet, which
+			// is under our MTU. Path MTU discovery should lift it — but it
+			// needs traffic to probe with, so drive some and watch.
+			println!("\nTUN MTU: {TUN_MTU}. Watching the datagram limit:");
+			for round in 0..6 {
+				let max = conn.max_datagram_size().unwrap_or(0);
+				let verdict = if max >= TUN_MTU as usize { "fits" } else { "TOO SMALL" };
+				println!("  {}s  max datagram {max:>5}  {verdict}", round);
+
+				// Probe-sized traffic, so PMTUD has something to work with.
+				let probe = Bytes::from(vec![0u8; max.min(TUN_MTU as usize)]);
+				for _ in 0..50 {
+					let _ = conn.send_datagram(probe.clone());
 				}
+				tokio::time::sleep(Duration::from_secs(1)).await;
+			}
+
+			match conn.max_datagram_size() {
+				Some(max) if max >= TUN_MTU as usize => {
+					println!("\n✓ settled above the MTU — full-size packets fit")
+				}
+				Some(max) => println!(
+					"\n✗ settled at {max}, {} short of the MTU — full-size packets keep dropping",
+					TUN_MTU as usize - max
+				),
 				None => println!("\n✗ peer does not accept datagrams at all"),
 			}
 

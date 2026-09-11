@@ -12,15 +12,18 @@ pub fn interface_name() -> String {
 	std::env::var("QUIX_IFACE").unwrap_or_else(|_| DEFAULT_INTERFACE_NAME.to_string())
 }
 
-/// Each IP packet is forwarded as one QUIC datagram, so the MTU has to stay
-/// under the smallest datagram any path will carry — otherwise full-size
-/// packets are dropped while small ones get through, which looks like "ping
-/// works but nothing else does".
+/// 1280 is forced on us from below: it is RFC 8200's minimum IPv6 link MTU,
+/// Windows applies our MTU to IPv6 as well as IPv4, and it rejects anything
+/// smaller with ERROR_INVALID_PARAMETER. It is also what Tailscale and
+/// WireGuard use, so it is well-trodden.
 ///
-/// QUIC guarantees only a 1200-byte packet (quinn's `INITIAL_MTU`), which
-/// measures out to 1162 bytes of datagram payload; the rest is margin for
-/// header overhead varying with connection-id length.
-pub const MTU: u16 = 1150;
+/// It sits slightly above what a *freshly established* QUIC link can carry in
+/// one datagram (1162 bytes, from quinn's guaranteed 1200-byte packet), so
+/// full-size packets can be dropped until path MTU discovery raises the limit
+/// — a second or two, which TCP retransmits through. `serve_link` warns when a
+/// link settles below 1280, and the `too big` counter in `quix status` shows
+/// whether it is still happening.
+pub const MTU: u16 = 1280;
 
 /// Derives a stable virtual IPv4 address from a peer's public key,
 /// inside the CGNAT range 100.64.0.0/10.
