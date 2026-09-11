@@ -79,6 +79,12 @@ life. `quix status` flags any link that stays below the MTU.
 ### Linux
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/quixvpn/quix/master/scripts/install.sh | sudo bash
+```
+
+Or from a clone, which also lets you install a local build:
+
+```bash
 sudo ./scripts/install.sh            # from the latest release
 sudo ./scripts/install.sh --local    # from a local build
 sudo ./scripts/install.sh --uninstall
@@ -97,6 +103,12 @@ socket at `/run/quix/quixd.sock`.
 ### Windows
 
 From an **elevated** PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/quixvpn/quix/master/scripts/install.ps1 | iex
+```
+
+Or from a clone, which is the only way to pass flags:
 
 ```powershell
 .\scripts\install.ps1              # from the latest release
@@ -140,6 +152,8 @@ QUIX_SOCKET=/tmp/quix.sock ./target/debug/quix status
 | `quix status -v` | Adds per-hop packet counters and full endpoint ids |
 | `quix ping <peer-id>` | Probe a peer's link and report RTT |
 | `quix set-operator <user>` | Let a local user run commands without sudo |
+| `quix update` | Install the latest release over this one |
+| `quix version` | Installed version, matching the release tag |
 
 A typical session:
 
@@ -162,6 +176,23 @@ peers  1/1 linked
 
 `●` means the data-plane link is up, `○` means the peer is known but not
 currently reachable.
+
+### Updating
+
+```bash
+quix version            # quix v0.1.0
+quix update --check     # what's available, installs nothing
+sudo quix update        # stop the service, swap both binaries, start it again
+sudo quix update --force   # reinstall the same version
+```
+
+It downloads both binaries for your platform, verifies their SHA-256 against
+the release, and only then stops the service and swaps them — a failed download
+can't leave you half-updated. The old binaries are renamed aside rather than
+overwritten, since a running executable can't be replaced in place on Windows.
+
+Updating needs write access to wherever quix is installed, so `sudo` on Linux
+and an elevated PowerShell on Windows.
 
 ### Diagnosing
 
@@ -238,6 +269,8 @@ Being explicit about what isn't built yet:
 - **No `quix up` / `down`,** and no way to pause without stopping the daemon.
 - **Path MTU.** A link that settles below 1280 bytes drops large packets rather
   than fragmenting them.
+
+Planned work and the reasoning behind it lives in [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 

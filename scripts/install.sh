@@ -78,12 +78,29 @@ chmod 644 "$UNIT_DIR/$SERVICE.service"
 systemctl daemon-reload
 systemctl enable --now "$SERVICE"
 
-# Give it a moment to bind before reporting, so a failure shows up here rather
-# than the first time the user runs a command.
-sleep 2
-if ! systemctl is-active --quiet "$SERVICE"; then
+# systemd reports the unit active as soon as the process is up, which is before
+# the daemon has picked a relay (up to 10s), brought the TUN up and bound its
+# socket. Wait for the socket itself, which is the last thing it does.
+info "waiting for the daemon to come up"
+socket=$(systemctl show -p Environment --value "$SERVICE" |
+	tr ' ' '\n' | sed -n 's/^QUIX_SOCKET=//p')
+socket=${socket:-/run/quix/quixd.sock}
+
+ready=
+for _ in $(seq 1 40); do
+	if ! systemctl is-active --quiet "$SERVICE"; then
+		echo
+		echo "the service stopped while starting. recent log:" >&2
+		journalctl -u "$SERVICE" -n 20 --no-pager >&2
+		exit 1
+	fi
+	if [[ -S $socket ]]; then ready=1; break; fi
+	sleep 0.5
+done
+
+if [[ -z $ready ]]; then
 	echo
-	echo "the service did not start. recent log:" >&2
+	echo "the daemon did not bind $socket within 20s. recent log:" >&2
 	journalctl -u "$SERVICE" -n 20 --no-pager >&2
 	exit 1
 fi

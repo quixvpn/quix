@@ -122,11 +122,23 @@ try {
     & sc.exe failure $Service reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
 
     Start-Service -Name $Service
-    Start-Sleep -Seconds 3
 
-    $state = (Get-Service -Name $Service).Status
-    if ($state -ne 'Running') {
-        Write-Error "the service did not start (state: $state). Check Event Viewer -> Windows Logs -> Application."
+    # The SCM reports Running as soon as the service reports it, which is
+    # before the daemon has picked a relay (up to 10s), brought the TUN up and
+    # opened its pipe. Wait for the pipe itself, which is the last thing it does.
+    Info 'waiting for the daemon to come up'
+    $ready = $false
+    foreach ($attempt in 1..40) {
+        $state = (Get-Service -Name $Service).Status
+        if ($state -ne 'Running' -and $state -ne 'StartPending') {
+            Write-Error "the service stopped while starting (state: $state). Check Event Viewer -> Windows Logs -> Application."
+            exit 1
+        }
+        if (Test-Path '\\.\pipe\quix-daemon') { $ready = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $ready) {
+        Write-Error 'the daemon did not open its control pipe within 20s. Check Event Viewer -> Windows Logs -> Application.'
         exit 1
     }
 
