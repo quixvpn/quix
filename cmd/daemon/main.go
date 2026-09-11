@@ -13,5 +13,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to start quix daemon: %v", err)
 	}
-	fmt.Println(endpoint.Id())
+
+	fmt.Println("quixd listening, id:", endpoint.Id())
+	iroh.AcceptLoop(endpoint) // blocks forever
 }
