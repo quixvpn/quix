@@ -12,9 +12,15 @@ pub fn interface_name() -> String {
 	std::env::var("QUIX_IFACE").unwrap_or_else(|_| DEFAULT_INTERFACE_NAME.to_string())
 }
 
-/// Kept under the QUIC datagram limit on a normal 1500-byte path, so a full
-/// TUN frame fits in one datagram instead of being dropped as oversized.
-pub const MTU: u16 = 1280;
+/// Each IP packet is forwarded as one QUIC datagram, so the MTU has to stay
+/// under the smallest datagram any path will carry — otherwise full-size
+/// packets are dropped while small ones get through, which looks like "ping
+/// works but nothing else does".
+///
+/// QUIC guarantees only a 1200-byte packet (quinn's `INITIAL_MTU`), which
+/// measures out to 1162 bytes of datagram payload; the rest is margin for
+/// header overhead varying with connection-id length.
+pub const MTU: u16 = 1150;
 
 /// Derives a stable virtual IPv4 address from a peer's public key,
 /// inside the CGNAT range 100.64.0.0/10.

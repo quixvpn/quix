@@ -1,7 +1,7 @@
 use anyhow::Result;
 use interprocess::local_socket::tokio::{prelude::*, Listener, Stream};
 use interprocess::local_socket::ListenerOptions;
-use proto::{PeerStatus, Request, Response};
+use proto::{PeerStatus, Request, Response, Traffic};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::state::State;
@@ -110,7 +110,19 @@ async fn dispatch(req: Request, state: &State) -> Response {
 				})
 				.collect();
 
+			let s = state.stats().snapshot();
 			Response::Status {
+				traffic: Traffic {
+					tun_rx: s.tun_rx,
+					tun_tx: s.tun_tx,
+					mesh_tx: s.mesh_tx,
+					mesh_rx: s.mesh_rx,
+					no_route: s.no_route,
+					no_link: s.no_link,
+					oversize: s.oversize,
+					send_err: s.send_err,
+					tun_tx_err: s.tun_tx_err,
+				},
 				endpoint_id: state.own_id().to_string(),
 				virtual_ip: state.virtual_ip().to_string(),
 				network: state.network_name().await,

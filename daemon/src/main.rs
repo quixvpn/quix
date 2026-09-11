@@ -7,6 +7,7 @@ mod membership;
 mod mesh;
 mod peers;
 mod state;
+mod stats;
 mod tun;
 
 use admin::{AdminHandler, ADMIN_ALPN};

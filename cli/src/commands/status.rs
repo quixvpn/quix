@@ -16,6 +16,7 @@ pub async fn run(_args: StatusArgs) -> Result<()> {
 			network,
 			coordinator,
 			peers,
+			traffic,
 		} => {
 			let role = if coordinator { "coordinator" } else { "member" };
 			match network {
@@ -24,6 +25,32 @@ pub async fn run(_args: StatusArgs) -> Result<()> {
 			}
 			println!("address  {virtual_ip}");
 			println!("id       {endpoint_id}");
+
+			// Ordered as a packet travels, so the first zero is the failing hop.
+			println!(
+				"\noutbound  tun read {}  ->  sent {}",
+				traffic.tun_rx, traffic.mesh_tx
+			);
+			println!(
+				"inbound   received {}  ->  tun write {}",
+				traffic.mesh_rx, traffic.tun_tx
+			);
+
+			let drops = [
+				("not a member", traffic.no_route),
+				("no link", traffic.no_link),
+				("too big", traffic.oversize),
+				("send failed", traffic.send_err),
+				("tun write failed", traffic.tun_tx_err),
+			];
+			let dropped: Vec<String> = drops
+				.iter()
+				.filter(|(_, n)| *n > 0)
+				.map(|(label, n)| format!("{label} {n}"))
+				.collect();
+			if !dropped.is_empty() {
+				println!("dropped   {}", dropped.join("  "));
+			}
 
 			if peers.is_empty() {
 				println!("\nno peers yet");

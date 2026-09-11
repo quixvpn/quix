@@ -9,8 +9,39 @@ pub struct Membership {
 	pub network_name: Option<String>,
 	pub coordinator_id: Option<String>,
 	pub members: HashSet<String>,
-	#[serde(default)]
+	#[serde(default, with = "hex_tokens")]
 	pending_invites: HashSet<[u8; 16]>,
+}
+
+/// Invite tokens are 16 raw bytes in memory but hex on disk. Serde would
+/// otherwise write them as 16-element number arrays, which are unreadable and
+/// wouldn't match the hex the on-the-wire protocol already uses.
+mod hex_tokens {
+	use serde::{Deserialize, Deserializer, Serialize, Serializer};
+	use std::collections::HashSet;
+
+	pub fn serialize<S: Serializer>(
+		tokens: &HashSet<[u8; 16]>,
+		serializer: S,
+	) -> Result<S::Ok, S::Error> {
+		let mut encoded: Vec<String> = tokens.iter().map(hex::encode).collect();
+		encoded.sort(); // stable output, so saving twice gives the same file
+		encoded.serialize(serializer)
+	}
+
+	pub fn deserialize<'de, D: Deserializer<'de>>(
+		deserializer: D,
+	) -> Result<HashSet<[u8; 16]>, D::Error> {
+		Vec::<String>::deserialize(deserializer)?
+			.into_iter()
+			.map(|token| {
+				let bytes = hex::decode(&token).map_err(serde::de::Error::custom)?;
+				bytes
+					.try_into()
+					.map_err(|_| serde::de::Error::custom("invite token must be 16 bytes"))
+			})
+			.collect()
+	}
 }
 
 fn path() -> Result<PathBuf> {
@@ -25,7 +56,8 @@ impl Membership {
 	pub fn load() -> Result<Self> {
 		let path = path()?;
 		match std::fs::read_to_string(&path) {
-			Ok(data) => serde_json::from_str(&data).context("parse network.json"),
+			Ok(data) => serde_json::from_str(&data)
+				.with_context(|| format!("parse {}", path.display())),
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
 			Err(e) => Err(e.into()),
 		}
@@ -191,6 +223,34 @@ mod tests {
 		assert!(m.is_member(&id(2)), "we stay in our own network");
 		assert!(m.is_member(&id(1)), "the coordinator stays");
 		assert!(m.is_member(&id(3)), "the pushed member is added");
+	}
+
+	#[test]
+	fn on_disk_tokens_are_hex_and_survive_a_round_trip() {
+		// Shaped like a real ~/.config/quix/network.json.
+		let stored = r#"{
+			"network_name": "my-net",
+			"coordinator_id": "5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",
+			"members": ["5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257"],
+			"pending_invites": ["bfc15e2af04b02803f18d1f735eaedad"]
+		}"#;
+
+		let mut m: Membership = serde_json::from_str(stored).expect("stored file must parse");
+		assert_eq!(m.network_name.as_deref(), Some("my-net"));
+
+		let token = hex::decode("bfc15e2af04b02803f18d1f735eaedad").unwrap();
+		let token: [u8; 16] = token.try_into().unwrap();
+		assert!(m.redeem_invite(&token, id(2)), "the stored invite must still redeem");
+
+		// Saving writes hex back, not a 16-element number array.
+		let written = serde_json::to_string(&Membership::default()).unwrap();
+		assert!(written.contains(r#""pending_invites":[]"#), "got {written}");
+	}
+
+	#[test]
+	fn tokens_of_the_wrong_length_are_rejected() {
+		let stored = r#"{"members":[],"pending_invites":["ab"]}"#;
+		assert!(serde_json::from_str::<Membership>(stored).is_err());
 	}
 
 	#[test]

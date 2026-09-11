@@ -18,6 +18,10 @@ use iroh::Endpoint;
 const ALPN: &[u8] = b"quix-discovery-check/0";
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Mirrors `tun::MTU`. Duplicated because the daemon is a bin-only crate, so
+/// an example can't import from it — keep the two in step.
+const TUN_MTU: u16 = 1150;
+
 #[derive(Debug, Clone)]
 struct Accept;
 
@@ -55,6 +59,25 @@ async fn main() -> Result<()> {
 	match tokio::time::timeout(TIMEOUT, b.connect(a.id(), ALPN)).await {
 		Ok(Ok(conn)) => {
 			println!("✓ connected in {:.1}s", started.elapsed().as_secs_f64());
+
+			// The mesh forwards each IP packet as one QUIC datagram, so a TUN
+			// MTU above this limit means full-size packets are silently dropped
+			// while small ones (a ping) sail through.
+			match conn.max_datagram_size() {
+				Some(max) => {
+					println!("\nmax datagram: {max} bytes   TUN MTU: {}", TUN_MTU);
+					if (TUN_MTU as usize) > max {
+						println!(
+							"✗ MTU is {} bytes over the limit — full-size packets will be dropped",
+							TUN_MTU as usize - max
+						);
+					} else {
+						println!("✓ a full-size packet fits in one datagram");
+					}
+				}
+				None => println!("\n✗ peer does not accept datagrams at all"),
+			}
+
 			conn.close(0u32.into(), b"done");
 			println!("\ndiscovery works — a join failure is not this.");
 		}

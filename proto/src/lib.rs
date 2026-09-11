@@ -19,6 +19,20 @@ pub struct PeerStatus {
 	pub linked: bool,
 }
 
+/// Per-hop packet counters, in the order a packet visits them.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Traffic {
+	pub tun_rx: u64,
+	pub tun_tx: u64,
+	pub mesh_tx: u64,
+	pub mesh_rx: u64,
+	pub no_route: u64,
+	pub no_link: u64,
+	pub oversize: u64,
+	pub send_err: u64,
+	pub tun_tx_err: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
 	Ok { echo: String },
@@ -28,6 +42,7 @@ pub enum Response {
 		network: Option<String>,
 		coordinator: bool,
 		peers: Vec<PeerStatus>,
+		traffic: Traffic,
 	},
 	Pong { virtual_ip: String, rtt_ms: Option<f64> },
 	Invite { code: String },

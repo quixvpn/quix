@@ -9,6 +9,7 @@ use tun_rs::AsyncDevice;
 
 use crate::membership::Membership;
 use crate::peers::Peers;
+use crate::stats::Stats;
 
 #[derive(Clone)]
 pub struct State {
@@ -16,6 +17,7 @@ pub struct State {
 	pub tun: Arc<AsyncDevice>,
 	membership: Arc<Mutex<Membership>>,
 	peers: Peers,
+	stats: Stats,
 	dial_tx: mpsc::Sender<EndpointId>,
 }
 
@@ -36,6 +38,7 @@ impl State {
 			tun: Arc::new(tun),
 			membership: Arc::new(Mutex::new(Membership::load()?)),
 			peers: Peers::default(),
+			stats: Stats::default(),
 			dial_tx,
 		})
 	}
@@ -54,6 +57,10 @@ impl State {
 
 	pub fn peers(&self) -> &Peers {
 		&self.peers
+	}
+
+	pub fn stats(&self) -> &Stats {
+		&self.stats
 	}
 
 	/// Rebuilds the routing table from the roster and asks the dialer to reach

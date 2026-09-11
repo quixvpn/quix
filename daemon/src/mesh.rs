@@ -40,6 +40,18 @@ pub async fn serve_link(state: State, conn: Connection) {
 
 	println!("peer linked: {peer}");
 
+	// Checked once here rather than per packet: if this ever fires, small
+	// packets will flow and large ones will vanish, so say so loudly.
+	match conn.max_datagram_size() {
+		Some(max) if (crate::tun::MTU as usize) > max => eprintln!(
+			"warning: link to {peer} carries {max}-byte datagrams but the MTU is {}; \
+			 packets over {max} bytes will be dropped",
+			crate::tun::MTU
+		),
+		None => eprintln!("warning: link to {peer} does not support datagrams; no traffic will flow"),
+		_ => {}
+	}
+
 	// A member that was offline while others joined has a stale roster and
 	// would reject them. Re-sync it now that we can reach them again.
 	if state.is_coordinator().await {
@@ -60,10 +72,13 @@ pub async fn serve_link(state: State, conn: Connection) {
 	loop {
 		match conn.read_datagram().await {
 			Ok(packet) => {
+				state.stats().mesh_rx();
 				if let Err(e) = tun.send(&packet).await {
+					state.stats().tun_tx_err();
 					eprintln!("tun write failed: {e}");
 					break;
 				}
+				state.stats().tun_tx();
 			}
 			Err(e) => {
 				println!("link to {peer} closed: {e}");
@@ -99,26 +114,34 @@ pub async fn tun_to_mesh(state: State) {
 
 		let packet = &buf[..len];
 		let Some(dst) = crate::tun::dst_ipv4(packet) else {
-			continue;
+			continue; // not IPv4; nothing to route on
 		};
+		state.stats().tun_rx();
+
 		let Some(peer) = state.peers().route(dst).await else {
-			continue; // not a mesh address
+			state.stats().no_route();
+			continue;
 		};
 		let Some(conn) = state.peers().link(&peer).await else {
 			// Routed but not connected yet: drop this packet and get a link up.
+			state.stats().no_link();
 			state.request_dial(peer);
 			continue;
 		};
 
-		if let Some(max) = conn.max_datagram_size() {
-			if packet.len() > max {
-				eprintln!("dropping {}-byte packet for {peer}: over the {max}-byte datagram limit", packet.len());
-				continue;
-			}
+		// Oversized packets are dropped without logging: this is the hot path,
+		// and the condition is reported once per link in `serve_link` instead.
+		if conn.max_datagram_size().is_some_and(|max| packet.len() > max) {
+			state.stats().oversize();
+			continue;
 		}
 
-		if let Err(e) = conn.send_datagram(Bytes::copy_from_slice(packet)) {
-			eprintln!("send to {peer} failed: {e}");
+		match conn.send_datagram(Bytes::copy_from_slice(packet)) {
+			Ok(()) => state.stats().mesh_tx(),
+			Err(e) => {
+				state.stats().send_err();
+				eprintln!("send to {peer} failed: {e}");
+			}
 		}
 	}
 }
