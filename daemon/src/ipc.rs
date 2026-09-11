@@ -9,23 +9,44 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::state::State;
 
+#[cfg(windows)]
 fn build_listener() -> Result<Listener> {
-	let raw = proto::socket_name();
-
-	let name = if cfg!(windows) {
-		raw.clone().to_ns_name::<GenericNamespaced>()?
-	} else {
-		let _ = std::fs::remove_file(&raw);
-		raw.clone().to_fs_name::<GenericFilePath>()?
+	use interprocess::os::windows::local_socket::ListenerOptionsExt;
+	use interprocess::os::windows::security_descriptor::{
+		AsSecurityDescriptorMutExt, SecurityDescriptor,
 	};
+	use std::ptr;
+
+	let raw = proto::socket_name();
+	let name = raw.to_ns_name::<GenericNamespaced>()?;
+
+	// Null DACL grants full access to every security principal — same intent
+	// as chmod 0o666 on Unix below. Confirmed via interprocess's own test
+	// suite (tests/os/windows/local_socket_security_descriptor/null_dacl.rs).
+	let mut sd = SecurityDescriptor::new()?;
+	unsafe {
+		sd.set_dacl(ptr::null_mut(), false)?;
+	}
+
+	Ok(ListenerOptions::new()
+		.name(name)
+		.security_descriptor(sd)
+		.create_tokio()?)
+}
+
+#[cfg(unix)]
+fn build_listener() -> Result<Listener> {
+	use std::os::unix::fs::PermissionsExt;
+
+	let raw = proto::socket_name();
+	let _ = std::fs::remove_file(&raw);
+	let name = raw.clone().to_fs_name::<GenericFilePath>()?;
 
 	let listener = ListenerOptions::new().name(name).create_tokio()?;
 
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::PermissionsExt;
-		std::fs::set_permissions(&raw, std::fs::Permissions::from_mode(0o666))?;
-	}
+	// TODO: tighten this to 0660 + a dedicated "quix" group once quixd
+	// runs as a proper system service, instead of world-writable.
+	std::fs::set_permissions(&raw, std::fs::Permissions::from_mode(0o666))?;
 
 	Ok(listener)
 }
@@ -75,39 +96,53 @@ async fn handle(conn: Stream, endpoint: Endpoint, state: State) -> Result<()> {
 			endpoint_id: endpoint.id().to_string(),
 			peer_count: state.peer_count(),
 		},
-        Request::CreateNetwork { name } => {
-            match state.create_network(name, endpoint.id().to_string()).await {
-                Ok(()) => Response::Ok { echo: "network created".to_string() },
-                Err(e) => Response::Error { message: e.to_string() },
-            }
-        }
-        Request::Invite => {
-            if !state.is_coordinator(&endpoint.id().to_string()).await {
-                Response::Error { message: "only the coordinator can invite".to_string() }
-            } else {
-                match state.generate_invite().await {
-                    Ok(token) => Response::Invite {
-                        code: format!("{}.{}", endpoint.id(), token),
-                    },
-                    Err(e) => Response::Error { message: e.to_string() },
-                }
-            }
-        }
-        Request::Join { code } => match code.split_once('.') {
-            Some((coordinator_id, token)) => {
-                match crate::connect::join_network(&endpoint, coordinator_id, token).await {
-                    Ok(name) => match state
-                        .set_joined(coordinator_id.to_string(), endpoint.id().to_string(), name.clone())
-                        .await
-                    {
-                        Ok(()) => Response::Joined { network_name: name },
-                        Err(e) => Response::Error { message: e.to_string() },
-                    },
-                    Err(e) => Response::Error { message: e.to_string() },
-                }
-            }
-            None => Response::Error { message: "invalid invite code".to_string() },
-        },
+		Request::CreateNetwork { name } => {
+			match state.create_network(name, endpoint.id().to_string()).await {
+				Ok(()) => Response::Ok {
+					echo: "network created".to_string(),
+				},
+				Err(e) => Response::Error {
+					message: e.to_string(),
+				},
+			}
+		}
+		Request::Invite => {
+			if !state.is_coordinator(&endpoint.id().to_string()).await {
+				Response::Error {
+					message: "only the coordinator can invite".to_string(),
+				}
+			} else {
+				match state.generate_invite().await {
+					Ok(token) => Response::Invite {
+						code: format!("{}.{}", endpoint.id(), token),
+					},
+					Err(e) => Response::Error {
+						message: e.to_string(),
+					},
+				}
+			}
+		}
+		Request::Join { code } => match code.split_once('.') {
+			Some((coordinator_id, token)) => {
+				match crate::connect::join_network(&endpoint, coordinator_id, token).await {
+					Ok(name) => match state
+						.set_joined(coordinator_id.to_string(), endpoint.id().to_string(), name.clone())
+						.await
+					{
+						Ok(()) => Response::Joined { network_name: name },
+						Err(e) => Response::Error {
+							message: e.to_string(),
+						},
+					},
+					Err(e) => Response::Error {
+						message: e.to_string(),
+					},
+				}
+			}
+			None => Response::Error {
+				message: "invalid invite code".to_string(),
+			},
+		},
 	};
 
 	let mut payload = serde_json::to_vec(&resp)?;
