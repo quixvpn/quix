@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
@@ -15,13 +14,14 @@ pub enum Response {
 	Error { message: String },
 }
 
-/// Where the daemon listens for CLI commands.
-pub fn socket_path() -> PathBuf {
+/// Name used to identify the daemon's local socket (unix socket path on
+/// Unix, named pipe name on Windows).
+pub fn socket_name() -> String {
 	if let Ok(custom) = std::env::var("QUIX_SOCKET") {
-		return PathBuf::from(custom);
+		return custom;
 	}
 	if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-		return PathBuf::from(dir).join("quix.sock");
+		return format!("{dir}/quix.sock");
 	}
-	PathBuf::from("/tmp/quix.sock")
+	"quix-daemon".to_string()
 }

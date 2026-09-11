@@ -29,10 +29,10 @@ async fn main() -> Result<()> {
     let virtual_ip = tun::virtual_ipv4(endpoint.id().as_bytes());
     println!("virtual IP: {virtual_ip}");
 
-    let _tun_device = tun::create(virtual_ip)?;
+    let tun_device = tun::create(virtual_ip)?;
     println!("tun device up: {}", tun::INTERFACE_NAME);
 
-    let state = State::default();
+    let state = State::new(tun_device);
 
 	let router = Router::builder(endpoint.clone())
         .accept(ALPN, Echo { state: state.clone() })

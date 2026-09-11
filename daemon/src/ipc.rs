@@ -1,21 +1,32 @@
 use anyhow::Result;
+use interprocess::local_socket::tokio::{prelude::*, Listener, Stream};
+use interprocess::local_socket::{
+	GenericFilePath, GenericNamespaced, ListenerOptions, ToFsName, ToNsName,
+};
 use iroh::Endpoint;
 use proto::{Request, Response};
-use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 
 use crate::state::State;
 
-pub async fn serve(endpoint: Endpoint, state: State) -> Result<()> {
-	let path = proto::socket_path();
-	let _ = std::fs::remove_file(&path); // clean up a stale socket from a previous run
+fn build_listener() -> Result<Listener> {
+	let raw = proto::socket_name();
 
-	let listener = UnixListener::bind(&path)?;
-	std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+	let name = if cfg!(windows) {
+		raw.to_ns_name::<GenericNamespaced>()?
+	} else {
+		let _ = std::fs::remove_file(&raw); // clean up a stale socket file
+		raw.to_fs_name::<GenericFilePath>()?
+	};
+
+	Ok(ListenerOptions::new().name(name).create_tokio()?)
+}
+
+pub async fn serve(endpoint: Endpoint, state: State) -> Result<()> {
+	let listener = build_listener()?;
 
 	loop {
-		let (stream, _) = listener.accept().await?;
+		let stream = listener.accept().await?;
 		let endpoint = endpoint.clone();
 		let state = state.clone();
 		tokio::spawn(async move {
@@ -26,7 +37,7 @@ pub async fn serve(endpoint: Endpoint, state: State) -> Result<()> {
 	}
 }
 
-async fn handle(mut stream: UnixStream, endpoint: Endpoint, state: State) -> Result<()> {
+async fn handle(mut stream: Stream, endpoint: Endpoint, state: State) -> Result<()> {
 	let mut buf = Vec::new();
 	stream.read_to_end(&mut buf).await?;
 
