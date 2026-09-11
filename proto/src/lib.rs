@@ -14,7 +14,10 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerStatus {
 	pub id: String,
-	pub virtual_ip: String,
+	/// Primary overlay address.
+	pub v6: String,
+	/// Compatibility address, for applications that cannot speak IPv6.
+	pub v4: String,
 	/// Whether a data-plane link to this peer is currently up.
 	pub linked: bool,
 }
@@ -38,13 +41,14 @@ pub enum Response {
 	Ok { echo: String },
 	Status {
 		endpoint_id: String,
-		virtual_ip: String,
+		v6: String,
+		v4: String,
 		network: Option<String>,
 		coordinator: bool,
 		peers: Vec<PeerStatus>,
 		traffic: Traffic,
 	},
-	Pong { virtual_ip: String, rtt_ms: Option<f64> },
+	Pong { v6: String, v4: String, rtt_ms: Option<f64> },
 	Invite { code: String },
 	Joined { network_name: Option<String> },
 	Error { message: String },

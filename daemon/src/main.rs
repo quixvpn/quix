@@ -6,6 +6,7 @@ mod ipc;
 mod membership;
 mod mesh;
 mod peers;
+mod routes;
 mod state;
 mod stats;
 mod tun;
@@ -51,10 +52,11 @@ async fn main() -> Result<()> {
 		),
 	}
 
-	let virtual_ip = tun::virtual_ipv4(endpoint.id().as_bytes());
-	println!("virtual IP: {virtual_ip}");
+	let (v4, v6) = tun::virtual_addrs(endpoint.id().as_bytes());
+	println!("virtual IPv6: {v6}");
+	println!("virtual IPv4: {v4}");
 
-	let tun_device = tun::create(virtual_ip)?;
+	let tun_device = tun::create(v4, v6)?;
 	println!("tun device up: {}", tun::interface_name());
 
 	let (dial_tx, dial_rx) = tokio::sync::mpsc::channel(DIAL_QUEUE);

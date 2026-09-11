@@ -1,7 +1,7 @@
 use anyhow::Result;
 use iroh::{Endpoint, EndpointId};
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -9,6 +9,7 @@ use tun_rs::AsyncDevice;
 
 use crate::membership::Membership;
 use crate::peers::Peers;
+use crate::routes::Routes;
 use crate::stats::Stats;
 
 #[derive(Clone)]
@@ -17,6 +18,7 @@ pub struct State {
 	pub tun: Arc<AsyncDevice>,
 	membership: Arc<Mutex<Membership>>,
 	peers: Peers,
+	routes: Routes,
 	stats: Stats,
 	dial_tx: mpsc::Sender<EndpointId>,
 }
@@ -38,6 +40,7 @@ impl State {
 			tun: Arc::new(tun),
 			membership: Arc::new(Mutex::new(Membership::load()?)),
 			peers: Peers::default(),
+			routes: Routes::new(crate::tun::interface_name()),
 			stats: Stats::default(),
 			dial_tx,
 		})
@@ -51,8 +54,8 @@ impl State {
 		&self.endpoint
 	}
 
-	pub fn virtual_ip(&self) -> Ipv4Addr {
-		crate::tun::virtual_ipv4(self.own_id().as_bytes())
+	pub fn virtual_addrs(&self) -> (Ipv4Addr, Ipv6Addr) {
+		crate::tun::virtual_addrs(self.own_id().as_bytes())
 	}
 
 	pub fn peers(&self) -> &Peers {
@@ -71,6 +74,10 @@ impl State {
 		self.peers
 			.set_routes(members.into_iter().filter(|id| *id != self.own_id()))
 			.await;
+
+		// The kernel needs a host route per member address, or packets never
+		// reach the TUN in the first place.
+		self.routes.sync(&self.peers.routed_addrs().await).await;
 
 		for id in self.peers.unlinked().await {
 			self.request_dial(id);

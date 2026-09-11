@@ -113,8 +113,8 @@ pub async fn tun_to_mesh(state: State) {
 		};
 
 		let packet = &buf[..len];
-		let Some(dst) = crate::tun::dst_ipv4(packet) else {
-			continue; // not IPv4; nothing to route on
+		let Some(dst) = crate::tun::dst_addr(packet) else {
+			continue; // not IP; nothing to route on
 		};
 		state.stats().tun_rx();
 

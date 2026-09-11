@@ -1,20 +1,24 @@
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use iroh::endpoint::Connection;
 use iroh::EndpointId;
 use tokio::sync::RwLock;
 
-use crate::tun::virtual_ipv4;
+use crate::tun::virtual_addrs;
 
-/// The mesh's forwarding state: which virtual IP belongs to which peer, and
-/// which of those peers we currently hold a live connection to.
+/// The mesh's forwarding state: which overlay address belongs to which peer,
+/// and which of those peers we currently hold a live connection to.
 ///
 /// Routes come from the membership roster and exist whether or not the peer is
 /// reachable; links come and go as connections are established and dropped.
 /// A packet for a routed-but-unlinked peer is what triggers a dial.
+///
+/// Every member contributes two routes, one per address family, both pointing
+/// at the same peer — so an IPv4-only application reaches the same node an
+/// IPv6 one does.
 #[derive(Clone, Default)]
 pub struct Peers {
 	inner: Arc<RwLock<Inner>>,
@@ -23,19 +27,26 @@ pub struct Peers {
 #[derive(Default)]
 struct Inner {
 	links: HashMap<EndpointId, Connection>,
-	routes: HashMap<Ipv4Addr, EndpointId>,
+	routes: HashMap<IpAddr, EndpointId>,
 }
 
 impl Peers {
 	/// Replaces the routing table with one derived from a membership roster.
-	/// Every member's address falls out of its public key, so this needs no
+	/// Every member's addresses fall out of its public key, so this needs no
 	/// coordination and survives restarts.
 	pub async fn set_routes(&self, members: impl IntoIterator<Item = EndpointId>) {
-		let routes = members
-			.into_iter()
-			.map(|id| (virtual_ipv4(id.as_bytes()), id))
-			.collect();
+		let mut routes = HashMap::new();
+		for id in members {
+			let (v4, v6) = virtual_addrs(id.as_bytes());
+			routes.insert(IpAddr::V4(v4), id);
+			routes.insert(IpAddr::V6(v6), id);
+		}
 		self.inner.write().await.routes = routes;
+	}
+
+	/// Every address we expect to carry, for the system routing table.
+	pub async fn routed_addrs(&self) -> HashSet<IpAddr> {
+		self.inner.read().await.routes.keys().copied().collect()
 	}
 
 	/// Registers a live link, returning false if one already exists for this
@@ -55,7 +66,7 @@ impl Peers {
 		self.inner.write().await.links.remove(id);
 	}
 
-	pub async fn route(&self, dst: Ipv4Addr) -> Option<EndpointId> {
+	pub async fn route(&self, dst: IpAddr) -> Option<EndpointId> {
 		self.inner.read().await.routes.get(&dst).copied()
 	}
 
@@ -66,25 +77,48 @@ impl Peers {
 	/// Routed peers we have no live link to — the dialer's work queue.
 	pub async fn unlinked(&self) -> Vec<EndpointId> {
 		let inner = self.inner.read().await;
-		inner
+		let mut ids: Vec<EndpointId> = inner
 			.routes
 			.values()
 			.filter(|id| !inner.links.contains_key(*id))
 			.copied()
-			.collect()
+			.collect();
+		// Each peer appears once per address family.
+		ids.sort();
+		ids.dedup();
+		ids
 	}
 
-	/// Every routed peer with its address and whether it's currently linked.
-	pub async fn snapshot(&self) -> Vec<(EndpointId, Ipv4Addr, bool)> {
+	/// Every member with both its addresses and whether it's currently linked.
+	pub async fn snapshot(&self) -> Vec<PeerRow> {
 		let inner = self.inner.read().await;
-		let mut rows: Vec<_> = inner
-			.routes
-			.iter()
-			.map(|(ip, id)| (*id, *ip, inner.links.contains_key(id)))
-			.collect();
-		rows.sort_by_key(|(_, ip, _)| *ip);
+
+		let mut rows: HashMap<EndpointId, PeerRow> = HashMap::new();
+		for (addr, id) in &inner.routes {
+			let row = rows.entry(*id).or_insert_with(|| PeerRow {
+				id: *id,
+				v4: Ipv4Addr::UNSPECIFIED,
+				v6: Ipv6Addr::UNSPECIFIED,
+				linked: inner.links.contains_key(id),
+			});
+			match addr {
+				IpAddr::V4(v4) => row.v4 = *v4,
+				IpAddr::V6(v6) => row.v6 = *v6,
+			}
+		}
+
+		let mut rows: Vec<PeerRow> = rows.into_values().collect();
+		rows.sort_by_key(|row| row.v6);
 		rows
 	}
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PeerRow {
+	pub id: EndpointId,
+	pub v4: Ipv4Addr,
+	pub v6: Ipv6Addr,
+	pub linked: bool,
 }
 
 #[cfg(test)]
@@ -96,13 +130,22 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn routes_map_a_members_address_back_to_it() {
+	async fn both_families_route_to_the_same_peer() {
 		let peers = Peers::default();
-		peers.set_routes([id(1), id(2)]).await;
+		peers.set_routes([id(1)]).await;
 
-		assert_eq!(peers.route(virtual_ipv4(id(1).as_bytes())).await, Some(id(1)));
-		assert_eq!(peers.route(virtual_ipv4(id(2).as_bytes())).await, Some(id(2)));
-		assert_eq!(peers.route(Ipv4Addr::new(8, 8, 8, 8)).await, None);
+		let (v4, v6) = virtual_addrs(id(1).as_bytes());
+		assert_eq!(peers.route(IpAddr::V4(v4)).await, Some(id(1)));
+		assert_eq!(peers.route(IpAddr::V6(v6)).await, Some(id(1)));
+	}
+
+	#[tokio::test]
+	async fn unknown_addresses_have_no_route() {
+		let peers = Peers::default();
+		peers.set_routes([id(1)]).await;
+
+		assert_eq!(peers.route("8.8.8.8".parse().unwrap()).await, None);
+		assert_eq!(peers.route("2001:4860::8888".parse().unwrap()).await, None);
 	}
 
 	#[tokio::test]
@@ -111,32 +154,23 @@ mod tests {
 		peers.set_routes([id(1)]).await;
 		peers.set_routes([id(2)]).await;
 
-		assert_eq!(peers.route(virtual_ipv4(id(1).as_bytes())).await, None);
-		assert_eq!(peers.route(virtual_ipv4(id(2).as_bytes())).await, Some(id(2)));
+		let (gone, _) = virtual_addrs(id(1).as_bytes());
+		assert_eq!(peers.route(IpAddr::V4(gone)).await, None);
+		assert_eq!(peers.routed_addrs().await.len(), 2, "one peer, two families");
 	}
 
 	#[tokio::test]
-	async fn every_routed_peer_starts_unlinked() {
+	async fn a_peer_is_listed_once_despite_two_routes() {
 		let peers = Peers::default();
 		peers.set_routes([id(1), id(2)]).await;
 
-		let mut unlinked = peers.unlinked().await;
-		unlinked.sort();
-		let mut expected = vec![id(1), id(2)];
-		expected.sort();
-
-		assert_eq!(unlinked, expected);
-		assert!(peers.link(&id(1)).await.is_none());
-	}
-
-	#[tokio::test]
-	async fn snapshot_lists_routed_peers_in_address_order() {
-		let peers = Peers::default();
-		peers.set_routes([id(1), id(2), id(3)]).await;
+		assert_eq!(peers.unlinked().await.len(), 2, "peers, not addresses");
+		assert_eq!(peers.routed_addrs().await.len(), 4);
 
 		let rows = peers.snapshot().await;
-		assert_eq!(rows.len(), 3);
-		assert!(rows.windows(2).all(|w| w[0].1 <= w[1].1), "sorted by address");
-		assert!(rows.iter().all(|(_, _, linked)| !linked));
+		assert_eq!(rows.len(), 2);
+		assert!(rows.iter().all(|row| !row.v4.is_unspecified()));
+		assert!(rows.iter().all(|row| !row.v6.is_unspecified()));
+		assert!(rows.iter().all(|row| !row.linked));
 	}
 }

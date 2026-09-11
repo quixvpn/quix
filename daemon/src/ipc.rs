@@ -91,7 +91,8 @@ async fn dispatch(req: Request, state: &State) -> Response {
 	match req {
 		Request::Ping { peer } => match crate::connect::probe(state, &peer).await {
 			Ok(probe) => Response::Pong {
-				virtual_ip: probe.virtual_ip.to_string(),
+				v6: probe.v6.to_string(),
+				v4: probe.v4.to_string(),
 				rtt_ms: probe.rtt.map(|rtt| rtt.as_secs_f64() * 1000.0),
 			},
 			Err(e) => error(e),
@@ -103,14 +104,16 @@ async fn dispatch(req: Request, state: &State) -> Response {
 				.snapshot()
 				.await
 				.into_iter()
-				.map(|(id, ip, linked)| PeerStatus {
-					id: id.to_string(),
-					virtual_ip: ip.to_string(),
-					linked,
+				.map(|row| PeerStatus {
+					id: row.id.to_string(),
+					v6: row.v6.to_string(),
+					v4: row.v4.to_string(),
+					linked: row.linked,
 				})
 				.collect();
 
 			let s = state.stats().snapshot();
+			let (v4, v6) = state.virtual_addrs();
 			Response::Status {
 				traffic: Traffic {
 					tun_rx: s.tun_rx,
@@ -124,7 +127,8 @@ async fn dispatch(req: Request, state: &State) -> Response {
 					tun_tx_err: s.tun_tx_err,
 				},
 				endpoint_id: state.own_id().to_string(),
-				virtual_ip: state.virtual_ip().to_string(),
+				v6: v6.to_string(),
+				v4: v4.to_string(),
 				network: state.network_name().await,
 				coordinator: state.is_coordinator().await,
 				peers,

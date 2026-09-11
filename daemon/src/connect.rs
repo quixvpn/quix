@@ -16,7 +16,8 @@ pub struct Admission {
 
 /// Result of probing a peer over the mesh.
 pub struct Probe {
-	pub virtual_ip: std::net::Ipv4Addr,
+	pub v4: std::net::Ipv4Addr,
+	pub v6: std::net::Ipv6Addr,
 	pub rtt: Option<Duration>,
 }
 
@@ -49,8 +50,10 @@ pub async fn probe(state: &State, peer: &str) -> Result<Probe> {
 		}
 	};
 
+	let (v4, v6) = crate::tun::virtual_addrs(id.as_bytes());
 	Ok(Probe {
-		virtual_ip: crate::tun::virtual_ipv4(id.as_bytes()),
+		v4,
+		v6,
 		rtt: conn.rtt(PathId::ZERO),
 	})
 }
