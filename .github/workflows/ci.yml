@@ -62,50 +62,58 @@ jobs:
 
       # Two shapes of asset: an archive for people installing by hand, and the
       # raw binaries so `quix update` can swap them without unpacking anything.
+      # Everything lands in dist/ — the archive is staged elsewhere because its
+      # directory name would otherwise collide with the raw `quix-<name>` asset.
       - name: package (linux)
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           bin=target/${{ matrix.target }}/release
-          staging="quix-${{ matrix.name }}"
-          mkdir -p "$staging"
-          cp "$bin/quix" "$bin/quixd" "$staging/"
-          cp packaging/quixd.service scripts/install.sh "$staging/"
-          tar -czf "$staging.tar.gz" "$staging"
-          sha256sum "$staging.tar.gz" > "$staging.tar.gz.sha256"
+          name=${{ matrix.name }}
+          mkdir -p dist
 
-          for exe in quix quixd; do
-            cp "$bin/$exe" "$exe-${{ matrix.name }}"
-            sha256sum "$exe-${{ matrix.name }}" > "$exe-${{ matrix.name }}.sha256"
+          stage=$(mktemp -d)
+          mkdir -p "$stage/quix-$name"
+          cp "$bin/quix" "$bin/quixd" "$stage/quix-$name/"
+          cp packaging/quixd.service scripts/install.sh "$stage/quix-$name/"
+          tar -czf "dist/quix-$name.tar.gz" -C "$stage" "quix-$name"
+
+          cp "$bin/quix" "dist/quix-$name"
+          cp "$bin/quixd" "dist/quixd-$name"
+
+          cd dist
+          for f in "quix-$name.tar.gz" "quix-$name" "quixd-$name"; do
+            sha256sum "$f" > "$f.sha256"
           done
+          ls -l
 
       - name: package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $bin = "target/${{ matrix.target }}/release"
-          $staging = "quix-${{ matrix.name }}"
-          New-Item -ItemType Directory -Path $staging | Out-Null
-          Copy-Item "$bin/quix.exe","$bin/quixd.exe" $staging
-          Copy-Item "scripts/install.ps1" $staging
-          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
-          (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower() + "  $staging.zip" |
-            Out-File -Encoding ascii "$staging.zip.sha256"
+          $name = "${{ matrix.name }}"
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
 
-          foreach ($exe in 'quix','quixd') {
-            $asset = "$exe-${{ matrix.name }}.exe"
-            Copy-Item "$bin/$exe.exe" $asset
-            (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower() + "  $asset" |
-              Out-File -Encoding ascii "$asset.sha256"
+          $stage = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())
+          New-Item -ItemType Directory -Path "$stage/quix-$name" -Force | Out-Null
+          Copy-Item "$bin/quix.exe","$bin/quixd.exe" "$stage/quix-$name"
+          Copy-Item "scripts/install.ps1" "$stage/quix-$name"
+          Compress-Archive -Path "$stage/quix-$name" -DestinationPath "dist/quix-$name.zip"
+
+          Copy-Item "$bin/quix.exe" "dist/quix-$name.exe"
+          Copy-Item "$bin/quixd.exe" "dist/quixd-$name.exe"
+
+          foreach ($f in "quix-$name.zip", "quix-$name.exe", "quixd-$name.exe") {
+            (Get-FileHash "dist/$f" -Algorithm SHA256).Hash.ToLower() + "  $f" |
+              Out-File -Encoding ascii "dist/$f.sha256"
           }
+          Get-ChildItem dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: quix-${{ matrix.name }}
-          path: |
-            quix-${{ matrix.name }}.tar.gz*
-            quix-${{ matrix.name }}.zip*
-            quix-${{ matrix.name }}*
-            quixd-${{ matrix.name }}*
+          path: dist/*
           if-no-files-found: error
 
   release:
@@ -121,12 +129,9 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          # Covers archives, raw binaries and every .sha256, without the two
+          # patterns overlapping and offering the same file twice.
           files: |
-            *.tar.gz
-            *.zip
-            *.sha256
-            quix-linux-*
-            quixd-linux-*
-            quix-windows-*.exe
-            quixd-windows-*.exe
+            quix-*
+            quixd-*
           generate_release_notes: true
