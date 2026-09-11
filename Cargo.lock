@@ -2379,6 +2379,7 @@ dependencies = [
  "clap",
  "proto",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

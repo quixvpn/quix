@@ -1,5 +1,7 @@
+mod connect;
 mod handler;
 mod identity;
+mod ipc;
 
 use anyhow::Result;
 use iroh::Endpoint;
@@ -8,7 +10,7 @@ use iroh::protocol::Router;
 
 use handler::Echo;
 
-const ALPN: &[u8] = b"quix-vpn/0";
+pub const ALPN: &[u8] = b"quix-vpn/0";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,12 +23,12 @@ async fn main() -> Result<()> {
 
 	println!("quixd listening, id: {}", endpoint.id());
 
-	let router = Router::builder(endpoint)
+	let router = Router::builder(endpoint.clone())
 		.accept(ALPN, Echo)
 		.spawn();
 
-	tokio::signal::ctrl_c().await?;
-	router.shutdown().await?;
+	ipc::serve(endpoint).await?; // blocks, serving CLI commands
 
+	router.shutdown().await?;
 	Ok(())
 }

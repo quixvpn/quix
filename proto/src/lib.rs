@@ -1,14 +1,25 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "lowercase")]
+pub enum Request {
+	Ping { peer: String, msg: String },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Response {
+	Ok { echo: String },
+	Error { message: String },
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+/// Where the daemon listens for CLI commands.
+pub fn socket_path() -> PathBuf {
+	if let Ok(custom) = std::env::var("QUIX_SOCKET") {
+		return PathBuf::from(custom);
+	}
+	if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+		return PathBuf::from(dir).join("quix.sock");
+	}
+	PathBuf::from("/tmp/quix.sock")
 }

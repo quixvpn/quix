@@ -12,3 +12,4 @@ proto = { path = "../proto" }
 clap = { version = "4", features = ["derive"] }
 serde_json.workspace = true
 anyhow.workspace = true
+tokio = { workspace = true, features = ["full"] }
