@@ -7,6 +7,11 @@ import (
 )
 
 func KeyPath() (string, error) {
+	// allow overriding the identity file, useful for running two peers locally
+	if custom := os.Getenv("QUIX_KEY_PATH"); custom != "" {
+		return custom, nil
+	}
+
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err

@@ -82,21 +82,26 @@ func handleConn(conn *irohlib.Connection) {
 
 	stream, err := conn.AcceptBi()
 	if err != nil {
-		log.Printf("accept stream failed: %v", err)
+		log.Printf("accept stream failed: %v", irohlib.As(err))
 		return
 	}
 
 	data, err := stream.Recv().ReadToEnd(1024)
 	if err != nil {
-		log.Printf("read failed: %v", err)
+		log.Printf("read failed: %v", irohlib.As(err))
 		return
 	}
 
-	log.Printf("received: %v", data)
+	log.Printf("received: %s", data)
 
-	if err := stream.Send().WriteAll(data); err != nil {
-		log.Printf("write failed: %v", err)
+	send := stream.Send()
+	if err := send.WriteAll(data); err != nil {
+		log.Printf("write failed: %v", irohlib.As(err))
 		return
 	}
-	stream.Send().Finish()
+	if err := send.Finish(); err != nil {
+		log.Printf("finish failed: %v", irohlib.As(err))
+		return
+	}
+	send.Stopped()
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	irohlib "git.coopcloud.tech/decentral1se/iroh-go"
 	"github.com/quixvpn/quix/internal/iroh"
 )
 
@@ -23,7 +24,7 @@ func main() {
 
 	echo, err := iroh.Ping(endpoint, *peerID, []byte("hello from quix"))
 	if err != nil {
-		log.Fatalf("ping failed: %v", err)
+		log.Fatalf("ping failed: %v", irohlib.As(err))
 	}
 
 	fmt.Println("echo:", string(echo))
