@@ -3,6 +3,7 @@ mod handler;
 mod identity;
 mod ipc;
 mod state;
+mod tun;
 
 use anyhow::Result;
 use iroh::Endpoint;
@@ -24,6 +25,12 @@ async fn main() -> Result<()> {
 		.await?;
 
 	println!("quixd listening, id: {}", endpoint.id());
+
+    let virtual_ip = tun::virtual_ipv4(endpoint.id().as_bytes());
+    println!("virtual IP: {virtual_ip}");
+
+    let _tun_device = tun::create(virtual_ip)?;
+    println!("tun device up: {}", tun::INTERFACE_NAME);
 
     let state = State::default();
 
