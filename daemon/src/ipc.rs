@@ -286,10 +286,21 @@ async fn set_hostname(state: &State, requested: &str, force: bool) -> anyhow::Re
 	let wanted = crate::names::validate(requested, &own_id).map_err(|e| anyhow::anyhow!(e))?;
 
 	if state.is_coordinator().await {
-		return state
+		let assigned = state
 			.claim_hostname(&own_id, &wanted, force)
 			.await?
-			.map_err(|e| anyhow::anyhow!(e));
+			.map_err(|e| anyhow::anyhow!(e))?;
+
+		// Renaming ourselves changes the roster exactly as renaming a member
+		// does, so it has to be pushed the same way — otherwise everyone else
+		// keeps calling us by our fallback.
+		crate::admin::broadcast_roster(
+			state,
+			&own_id,
+			state.network_name().await,
+			state.roster().await,
+		);
+		return Ok(assigned);
 	}
 
 	let coordinator = state

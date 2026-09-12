@@ -224,7 +224,9 @@ ssh user@nas.homelab.quix
 On **Linux** that is a systemd-resolved routing domain (`~quix`) attached to the
 `quix` interface, so only `.quix` comes to us and every other name resolves
 exactly as before. Because the configuration is per-link, it disappears together
-with the interface — a killed daemon leaves nothing stale behind.
+with the interface — a killed daemon leaves nothing stale behind. resolved is
+told the port as well as the address, so the daemon answers on an unprivileged
+one and needs no capability to bind sockets.
 
 On **Windows** it is an NRPT rule scoped to `.quix`. Those live in the registry
 and outlast the process, so the daemon removes any rule of its own at startup
@@ -254,8 +256,8 @@ digits and hyphens. Networks created before that rule are sanitised rather than
 refused.
 
 Override the testing address with `QUIX_DNS_ADDR`. The daemon additionally
-listens on port 53 of its own mesh addresses, which is what the OS is pointed
-at — NRPT rules carry no port, so 53 is not optional there.
+listens on its mesh addresses, which is what the OS is pointed at: port 5354 on
+Linux, and port 53 on Windows because NRPT rules carry no port field.
 
 To see what Linux thinks:
 

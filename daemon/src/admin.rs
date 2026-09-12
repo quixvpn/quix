@@ -210,29 +210,41 @@ impl AdminHandler {
 		}
 	}
 
-	/// Fire-and-forget roster push to every member except us and the joiner
-	/// (the joiner already got the roster in its join response).
 	fn broadcast_roster(&self, subject: &str, network_name: Option<String>, roster: Vec<Member>) {
-		let own_id = self.state.own_id().to_string();
-		let targets: Vec<String> = roster
-			.iter()
-			.map(|m| m.id.clone())
-			.filter(|id| *id != own_id && id != subject)
-			.collect();
+		broadcast_roster(&self.state, subject, network_name, roster)
+	}
+}
 
-		for target in targets {
-			let state = self.state.clone();
-			let network_name = network_name.clone();
-			let roster = roster.clone();
-			tokio::spawn(async move {
-				let Ok(id) = target.parse() else { return };
-				if let Err(e) =
-					crate::connect::push_roster(state.endpoint(), id, network_name, roster).await
-				{
-					eprintln!("roster push to {target} failed: {e}");
-				}
-			});
-		}
+/// Fire-and-forget roster push to every member except us and the subject of the
+/// change (who already learned the outcome from the reply that triggered this).
+///
+/// Free-standing because the coordinator also changes the roster from the IPC
+/// side — renaming itself — and that has to reach everyone too.
+pub fn broadcast_roster(
+	state: &State,
+	subject: &str,
+	network_name: Option<String>,
+	roster: Vec<Member>,
+) {
+	let own_id = state.own_id().to_string();
+	let targets: Vec<String> = roster
+		.iter()
+		.map(|m| m.id.clone())
+		.filter(|id| *id != own_id && id != subject)
+		.collect();
+
+	for target in targets {
+		let state = state.clone();
+		let network_name = network_name.clone();
+		let roster = roster.clone();
+		tokio::spawn(async move {
+			let Ok(id) = target.parse() else { return };
+			if let Err(e) =
+				crate::connect::push_roster(state.endpoint(), id, network_name, roster).await
+			{
+				eprintln!("roster push to {target} failed: {e}");
+			}
+		});
 	}
 }
 

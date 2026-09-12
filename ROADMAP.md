@@ -110,6 +110,14 @@ anyone. Publishing a signed network record (pkarr, as iroh already uses for
 address discovery) would let admission survive the coordinator being away, and
 make the roster verifiable rather than merely received over a trusted link.
 
+### The resolver answers UDP only
+
+If systemd-resolved ever retries a `.quix` query over TCP — on truncation, or
+while downgrading through its feature levels — nothing is listening. Answers are
+a single record today so the truncation bit should never be set, but it is a
+gap, and a host configured with `DNSSEC=yes` would also fail to validate a zone
+with no chain of trust.
+
 ### Resolver integration on macOS
 
 Linux registers a systemd-resolved routing domain and Windows an NRPT rule.

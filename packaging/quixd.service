@@ -24,7 +24,8 @@ RuntimeDirectory=quix
 RuntimeDirectoryMode=0755
 
 # Creating a TUN device and installing routes is all this needs; it does not
-# need the rest of root.
+# need the rest of root. The resolver answers on an unprivileged port and
+# systemd-resolved is told which one, so no bind capability is required.
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=yes

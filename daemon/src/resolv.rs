@@ -7,7 +7,7 @@
 //! Both are scoped to the zone. Everything outside `.quix` resolves exactly as
 //! it did before.
 
-use std::net::IpAddr;
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
@@ -16,8 +16,8 @@ use crate::dns::ZONE;
 
 /// Points the system resolver at us for `.quix`, and nothing else.
 ///
-/// `iface` is the mesh interface; `server` is the address we answer on.
-pub async fn register(iface: &str, server: IpAddr) -> Result<()> {
+/// `iface` is the mesh interface; `server` is where we answer.
+pub async fn register(iface: &str, server: SocketAddr) -> Result<()> {
 	platform::register(iface, server).await
 }
 
@@ -32,11 +32,15 @@ pub async fn deregister(iface: &str) -> Result<()> {
 mod platform {
 	use super::*;
 
-	pub async fn register(iface: &str, server: IpAddr) -> Result<()> {
+	pub async fn register(iface: &str, server: SocketAddr) -> Result<()> {
 		available()
 			.await
 			.context("systemd-resolved is not available")?;
 
+		// resolved takes a port, so we can answer on an unprivileged one.
+		// `SocketAddr`'s own formatting is already what it expects: bare for
+		// IPv4, bracketed for IPv6.
+		//
 		// Per-link configuration, deliberately: when the interface goes away so
 		// does this, which means a killed daemon leaves nothing stale behind.
 		run(&["dns", iface, &server.to_string()])
@@ -90,13 +94,15 @@ mod platform {
 	/// Tagged so we only ever remove rules we created.
 	const COMMENT: &str = "quix mesh resolver";
 
-	pub async fn register(_iface: &str, server: IpAddr) -> Result<()> {
+	pub async fn register(_iface: &str, server: SocketAddr) -> Result<()> {
 		// NRPT rules live in the registry and outlast the process, so clear any
 		// left by a previous run before adding this one.
 		let _ = deregister(_iface).await;
 
+		// NRPT carries no port, which is why the Windows listener is on 53.
 		powershell(&format!(
-			"Add-DnsClientNrptRule -Namespace '.{ZONE}' -NameServers '{server}' -Comment '{COMMENT}'"
+			"Add-DnsClientNrptRule -Namespace '.{ZONE}' -NameServers '{}' -Comment '{COMMENT}'",
+			server.ip()
 		))
 		.await
 		.context("adding the NRPT rule")

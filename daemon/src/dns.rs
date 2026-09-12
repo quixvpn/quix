@@ -1,9 +1,8 @@
 //! A resolver for the `.quix` zone, answering from the in-memory roster.
 //!
-//! Listens in two places. Port 53 on the mesh addresses is what the OS
-//! resolver is pointed at — NRPT rules on Windows carry no port, so 53 is not
-//! optional there — and a loopback port of its own stays available for testing
-//! without involving the system resolver at all:
+//! Listens in two places: the mesh addresses, which is where the OS resolver is
+//! pointed, and a loopback port that stays available for testing without
+//! involving the system resolver at all:
 //!
 //! ```text
 //! dig @127.0.0.1 -p 5354 nas.homelab.quix AAAA
@@ -32,9 +31,16 @@ pub const ZONE: &str = "quix";
 /// worked. Never port 53, so it cannot collide with the system resolver.
 const DEFAULT_ADDR: &str = "127.0.0.1:5354";
 
-/// Where the OS resolver is told to send `.quix` queries. Port 53 because
-/// Windows NRPT rules cannot express anything else.
+/// Where the OS resolver is told to send `.quix` queries.
+///
+/// Windows NRPT rules carry no port field, so 53 is not optional there and the
+/// service runs as LocalSystem which may bind it. systemd-resolved accepts a
+/// port, so Linux uses an unprivileged one and the daemon needs no capability
+/// to bind sockets at all.
+#[cfg(windows)]
 const ZONE_PORT: u16 = 53;
+#[cfg(not(windows))]
+const ZONE_PORT: u16 = 5354;
 
 /// A freshly assigned IPv6 address is tentative until duplicate address
 /// detection finishes, and binding it before then fails. Worth a few retries.
@@ -59,7 +65,7 @@ pub fn listen_addr() -> Result<SocketAddr> {
 /// The loopback endpoint is required — without it there is no resolver at all.
 /// The mesh addresses are best-effort: losing them costs OS integration, not
 /// the ability to answer.
-pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Option<IpAddr>)> {
+pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Option<SocketAddr>)> {
 	let testing = listen_addr()?;
 	let socket = UdpSocket::bind(testing)
 		.await
@@ -78,7 +84,7 @@ pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Option<IpAddr>)> {
 			Ok(socket) => {
 				println!("resolver listening on {addr} for *.{ZONE}");
 				sockets.push(socket);
-				zone_server.get_or_insert(addr.ip());
+				zone_server.get_or_insert(addr);
 			}
 			Err(e) => eprintln!("warning: resolver could not bind {addr}: {e:#}"),
 		}
@@ -334,6 +340,28 @@ mod tests {
 	#[test]
 	fn garbage_is_not_answered_at_all() {
 		assert!(answer(b"not a dns packet", &peers(), Some("homelab")).is_none());
+	}
+
+	#[test]
+	fn the_zone_port_is_privileged_only_where_it_has_to_be() {
+		// Windows NRPT cannot express a port, so 53 is forced there. Linux can,
+		// so it uses an unprivileged one and needs no bind capability.
+		let privileged = ZONE_PORT < 1024;
+		assert_eq!(
+			privileged,
+			cfg!(windows),
+			"port {ZONE_PORT} is privileged on a platform that need not be"
+		);
+	}
+
+	#[test]
+	fn a_server_address_formats_the_way_resolvectl_expects() {
+		// resolved wants a bare IPv4 and a bracketed IPv6 when a port is given.
+		let v4 = SocketAddr::new(Ipv4Addr::new(10, 1, 2, 3).into(), ZONE_PORT);
+		let v6 = SocketAddr::new("200::1".parse::<Ipv6Addr>().unwrap().into(), ZONE_PORT);
+
+		assert_eq!(v4.to_string(), format!("10.1.2.3:{ZONE_PORT}"));
+		assert_eq!(v6.to_string(), format!("[200::1]:{ZONE_PORT}"));
 	}
 
 	#[test]
