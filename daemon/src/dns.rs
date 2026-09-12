@@ -154,8 +154,22 @@ fn answer(request: &[u8], peers: &[Entry], network: Option<&str>) -> Option<Vec<
 	let query = Packet::parse(request).ok()?;
 	let mut reply = Packet::new_reply(query.id());
 
+	// We are the authority for this zone, so say so rather than looking like a
+	// cache that happens to have the record.
+	reply.set_flags(simple_dns::PacketFlag::AUTHORITATIVE_ANSWER);
+	// Convention is to reflect the client's recursion-desired bit back.
+	if query.has_flags(simple_dns::PacketFlag::RECURSION_DESIRED) {
+		reply.set_flags(simple_dns::PacketFlag::RECURSION_DESIRED);
+	}
+
 	let mut found = false;
-	for question in query.questions {
+	for question in &query.questions {
+		// A reply must echo the question it answers: resolvers match the two to
+		// pair a response with its request, and reject a reply that does not.
+		// dig tolerates the omission and still prints the answer, which makes
+		// this easy to miss.
+		reply.questions.push(question.clone());
+
 		let Some(label) = host_in_zone(&question.qname.to_string(), network) else {
 			continue;
 		};
@@ -175,7 +189,7 @@ fn answer(request: &[u8], peers: &[Entry], network: Option<&str>) -> Option<Vec<
 		};
 
 		reply.answers.push(ResourceRecord::new(
-			question.qname.clone().into_owned(),
+			question.qname.clone(),
 			CLASS::IN,
 			TTL,
 			rdata,
@@ -184,7 +198,6 @@ fn answer(request: &[u8], peers: &[Entry], network: Option<&str>) -> Option<Vec<
 	}
 
 	if !found {
-		reply.set_flags(simple_dns::PacketFlag::AUTHORITATIVE_ANSWER);
 		*reply.rcode_mut() = RCODE::NameError;
 	}
 
@@ -312,6 +325,32 @@ mod tests {
 	}
 
 	#[test]
+	fn a_reply_echoes_the_question_it_answers() {
+		// Without this a resolver cannot pair the reply with its request and
+		// discards it. systemd-resolved reports "Received invalid reply"; dig
+		// prints the answer regardless, so only a real resolver catches it.
+		reply_to("nas.quix", simple_dns::TYPE::AAAA, |reply| {
+			assert_eq!(reply.questions.len(), 1);
+			assert_eq!(reply.questions[0].qname.to_string(), "nas.quix");
+		});
+	}
+
+	#[test]
+	fn a_reply_claims_authority_for_the_zone() {
+		reply_to("nas.quix", simple_dns::TYPE::AAAA, |reply| {
+			assert!(reply.has_flags(simple_dns::PacketFlag::AUTHORITATIVE_ANSWER));
+		});
+	}
+
+	#[test]
+	fn even_an_nxdomain_echoes_the_question() {
+		reply_to("nope.quix", simple_dns::TYPE::AAAA, |reply| {
+			assert_eq!(reply.rcode(), RCODE::NameError);
+			assert_eq!(reply.questions.len(), 1, "still has to be matchable");
+		});
+	}
+
+	#[test]
 	fn an_unknown_name_in_the_zone_is_nxdomain() {
 		reply_to("nope.quix", simple_dns::TYPE::AAAA, |reply| {
 			assert_eq!(reply.rcode(), RCODE::NameError);
@@ -362,6 +401,59 @@ mod tests {
 
 		assert_eq!(v4.to_string(), format!("10.1.2.3:{ZONE_PORT}"));
 		assert_eq!(v6.to_string(), format!("[200::1]:{ZONE_PORT}"));
+	}
+
+	/// Serves exactly one query on an ephemeral loopback port, so a real DNS
+	/// client can be pointed at it.
+	///
+	/// Round-tripping our own output through our own parser cannot catch a
+	/// reply that is well-formed but unusable — an empty question section, for
+	/// instance, which `dig` prints happily and a resolver discards.
+	#[tokio::test]
+	async fn a_real_dns_client_accepts_our_reply() {
+		let Ok(dig) = which_dig() else {
+			eprintln!("skipping: dig is not installed");
+			return;
+		};
+
+		let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let port = socket.local_addr().unwrap().port();
+
+		tokio::spawn(async move {
+			let mut buf = vec![0u8; MAX_PACKET];
+			let (len, from) = socket.recv_from(&mut buf).await.unwrap();
+			let reply = answer(&buf[..len], &peers(), Some("homelab")).unwrap();
+			socket.send_to(&reply, from).await.unwrap();
+		});
+
+		let out = tokio::process::Command::new(dig)
+			.args([
+				"@127.0.0.1",
+				"-p",
+				&port.to_string(),
+				"nas.homelab.quix",
+				"AAAA",
+			])
+			.output()
+			.await
+			.unwrap();
+		let text = String::from_utf8_lossy(&out.stdout);
+
+		assert!(text.contains("status: NOERROR"), "{text}");
+		// The question has to come back, or a resolver cannot match the reply.
+		assert!(text.contains("QUERY: 1"), "question not echoed:\n{text}");
+		assert!(text.contains("flags: qr aa"), "not authoritative:\n{text}");
+		assert!(text.contains("200::1"), "wrong address:\n{text}");
+	}
+
+	fn which_dig() -> Result<String> {
+		let out = std::process::Command::new("sh")
+			.args(["-c", "command -v dig"])
+			.output()?;
+		match out.status.success() {
+			true => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+			false => anyhow::bail!("no dig"),
+		}
 	}
 
 	#[test]
