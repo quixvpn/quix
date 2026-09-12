@@ -15,7 +15,19 @@ use clap::{Parser, Subcommand};
 pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 #[derive(Parser)]
-#[command(name = "quix", version = VERSION, about = "P2P mesh VPN over QUIC")]
+#[command(
+	name = "quix",
+	about = "P2P mesh VPN over QUIC.",
+	arg_required_else_help = true,
+	before_help = r#"
+ ██████╗ ██╗   ██╗██╗██╗  ██╗
+██╔═══██╗██║   ██║██║╚██╗██╔╝
+██║   ██║██║   ██║██║ ╚███╔╝ 
+██║▄▄ ██║██║   ██║██║ ██╔██╗ 
+╚██████╔╝╚██████╔╝██║██╔╝ ██╗
+ ╚══▀▀═╝  ╚═════╝ ╚═╝╚═╝  ╚═╝
+"#
+)]
 pub struct Cli {
 	#[command(subcommand)]
 	pub command: Command,
