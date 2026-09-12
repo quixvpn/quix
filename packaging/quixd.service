@@ -18,6 +18,8 @@ Environment=QUIX_KEY_PATH=/var/lib/quix/key
 Environment=QUIX_NETWORK_PATH=/var/lib/quix/network.json
 Environment=QUIX_SETTINGS_PATH=/var/lib/quix/settings.json
 Environment=QUIX_SOCKET=/run/quix/quixd.sock
+# journald already captures stdout; this is for keeping history past rotation.
+Environment=QUIX_LOG_PATH=/var/lib/quix/quixd.log
 StateDirectory=quix
 StateDirectoryMode=0700
 RuntimeDirectory=quix

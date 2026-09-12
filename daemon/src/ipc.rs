@@ -64,14 +64,14 @@ pub async fn serve(state: State) -> Result<()> {
 		let conn = match listener.accept().await {
 			Ok(c) => c,
 			Err(e) => {
-				eprintln!("incoming ipc connection error: {e}");
+				crate::warn!("incoming ipc connection error: {e}");
 				continue;
 			}
 		};
 		let state = state.clone();
 		tokio::spawn(async move {
 			if let Err(e) = handle(conn, state).await {
-				eprintln!("ipc request failed: {e}");
+				crate::warn!("ipc request failed: {e}");
 			}
 		});
 	}
@@ -91,7 +91,7 @@ async fn handle(conn: Stream, state: State) -> Result<()> {
 	let resp = match authz::check(&req, &caller, state.operator_uid().await) {
 		Ok(()) => dispatch(req, &state).await,
 		Err(message) => {
-			eprintln!("refused {req:?} from {}", caller.describe());
+			crate::warn!("refused {req:?} from {}", caller.describe());
 			Response::Error { message }
 		}
 	};
@@ -216,9 +216,9 @@ async fn dispatch(req: Request, state: &State) -> Response {
 				match id.parse() {
 					Ok(id) => match crate::connect::notify_leave(state.endpoint(), id).await {
 						Ok(()) => coordinator_notified = true,
-						Err(e) => eprintln!("telling the coordinator we left failed: {e:#}"),
+						Err(e) => crate::warn!("telling the coordinator we left failed: {e:#}"),
 					},
-					Err(e) => eprintln!("stored coordinator id is unusable: {e}"),
+					Err(e) => crate::warn!("stored coordinator id is unusable: {e}"),
 				}
 			}
 
@@ -315,7 +315,7 @@ async fn set_hostname(state: &State, requested: &str, force: bool) -> anyhow::Re
 			Ok(assigned)
 		}
 		Err(e) => {
-			eprintln!("claiming {wanted:?} with the coordinator failed: {e:#}");
+			crate::warn!("claiming {wanted:?} with the coordinator failed: {e:#}");
 			state.adopt_hostname(wanted.clone()).await?;
 			Ok(wanted)
 		}

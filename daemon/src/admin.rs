@@ -114,7 +114,7 @@ impl AdminHandler {
 			.await
 		{
 			Ok(Some((roster, hostname))) => {
-				println!("admitted new member: {requester}");
+				crate::info!("admitted new member: {requester}");
 				let network_name = self.state.network_name().await;
 
 				// Tell everyone already in the network about the new member, so
@@ -152,7 +152,7 @@ impl AdminHandler {
 
 		match self.state.claim_hostname(&requester, &hostname, false).await {
 			Ok(Ok(assigned)) => {
-				println!("{requester} is now {assigned}");
+				crate::info!("{requester} is now {assigned}");
 				let network_name = self.state.network_name().await;
 				let roster = self.state.roster().await;
 				self.broadcast_roster(&requester, network_name, roster);
@@ -176,7 +176,7 @@ impl AdminHandler {
 			// Already gone is the state they asked for, so not an error.
 			Ok(false) => AdminResponse::Ack,
 			Ok(true) => {
-				println!("member left: {requester}");
+				crate::info!("member left: {requester}");
 				let network_name = self.state.network_name().await;
 				let roster = self.state.roster().await;
 				self.broadcast_roster(&requester, network_name, roster);
@@ -242,7 +242,7 @@ pub fn broadcast_roster(
 			if let Err(e) =
 				crate::connect::push_roster(state.endpoint(), id, network_name, roster).await
 			{
-				eprintln!("roster push to {target} failed: {e}");
+				crate::warn!("roster push to {target} failed: {e}");
 			}
 		});
 	}

@@ -27,7 +27,7 @@ pub async fn serve_link(state: State, conn: Connection) {
 	let peer = conn.remote_id();
 
 	if !state.is_member(&peer.to_string()).await {
-		println!("rejected link from non-member: {peer}");
+		crate::info!("rejected link from non-member: {peer}");
 		conn.close(CLOSE_NOT_MEMBER.into(), b"not a member");
 		return;
 	}
@@ -38,17 +38,17 @@ pub async fn serve_link(state: State, conn: Connection) {
 		return;
 	}
 
-	println!("peer linked: {peer}");
+	crate::info!("peer linked: {peer}");
 
 	// Checked once here rather than per packet: if this ever fires, small
 	// packets will flow and large ones will vanish, so say so loudly.
 	match conn.max_datagram_size() {
-		Some(max) if (crate::tun::MTU as usize) > max => eprintln!(
+		Some(max) if (crate::tun::MTU as usize) > max => crate::warn!(
 			"warning: link to {peer} carries {max}-byte datagrams but the MTU is {}; \
 			 packets over {max} bytes will be dropped",
 			crate::tun::MTU
 		),
-		None => eprintln!("warning: link to {peer} does not support datagrams; no traffic will flow"),
+		None => crate::warn!("warning: link to {peer} does not support datagrams; no traffic will flow"),
 		_ => {}
 	}
 
@@ -62,7 +62,7 @@ pub async fn serve_link(state: State, conn: Connection) {
 			if let Err(e) =
 				crate::connect::push_roster(state.endpoint(), peer, network_name, roster).await
 			{
-				eprintln!("roster catch-up for {peer} failed: {e}");
+				crate::warn!("roster catch-up for {peer} failed: {e}");
 			}
 		});
 	}
@@ -75,20 +75,20 @@ pub async fn serve_link(state: State, conn: Connection) {
 				state.stats().mesh_rx();
 				if let Err(e) = tun.send(&packet).await {
 					state.stats().tun_tx_err();
-					eprintln!("tun write failed: {e}");
+					crate::warn!("tun write failed: {e}");
 					break;
 				}
 				state.stats().tun_tx();
 			}
 			Err(e) => {
-				println!("link to {peer} closed: {e}");
+				crate::info!("link to {peer} closed: {e}");
 				break;
 			}
 		}
 	}
 
 	state.peers().unregister(&peer).await;
-	println!("peer unlinked: {peer}");
+	crate::info!("peer unlinked: {peer}");
 }
 
 /// The single reader on the TUN device: every outbound packet is looked up by
@@ -107,7 +107,7 @@ pub async fn tun_to_mesh(state: State) {
 		let len = match tun.recv(&mut buf).await {
 			Ok(len) => len,
 			Err(e) => {
-				eprintln!("tun read failed: {e}");
+				crate::warn!("tun read failed: {e}");
 				return;
 			}
 		};
@@ -140,7 +140,7 @@ pub async fn tun_to_mesh(state: State) {
 			Ok(()) => state.stats().mesh_tx(),
 			Err(e) => {
 				state.stats().send_err();
-				eprintln!("send to {peer} failed: {e}");
+				crate::warn!("send to {peer} failed: {e}");
 			}
 		}
 	}
@@ -185,7 +185,7 @@ pub async fn dialer(state: State, mut requests: mpsc::Receiver<EndpointId>) {
 					}
 					Err(e) => {
 						in_flight.lock().unwrap().remove(&id);
-						eprintln!("dial to {id} failed: {e}");
+						crate::warn!("dial to {id} failed: {e}");
 					}
 				}
 			});

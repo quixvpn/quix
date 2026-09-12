@@ -116,7 +116,10 @@ try {
         -Value @(
             "QUIX_KEY_PATH=$stateDir\key",
             "QUIX_NETWORK_PATH=$stateDir\network.json",
-            "QUIX_SETTINGS_PATH=$stateDir\settings.json"
+            "QUIX_SETTINGS_PATH=$stateDir\settings.json",
+            # A Windows service has no console, so without this every
+            # diagnostic the daemon prints is lost.
+            "QUIX_LOG_PATH=$stateDir\quixd.log"
         )
 
     # Come back automatically after a crash, matching Restart=on-failure on Linux.

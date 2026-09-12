@@ -5,6 +5,7 @@ mod dns;
 mod handler;
 mod identity;
 mod ipc;
+mod log;
 mod membership;
 mod mesh;
 mod names;
@@ -48,7 +49,7 @@ fn main() -> Result<()> {
 
 	runtime()?.block_on(run(async {
 		let _ = tokio::signal::ctrl_c().await;
-		println!("interrupted");
+		crate::info!("interrupted");
 	}))
 }
 
@@ -67,7 +68,11 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 		.bind()
 		.await?;
 
-	println!("quixd listening, id: {}", endpoint.id());
+	if let Some(path) = log::path() {
+		crate::info!("logging to {}", path.display());
+	}
+	crate::info!("quixd {} listening, id: {}", proto::VERSION_TAG, endpoint.id());
+	crate::info!("state: {}", identity::key_path()?.display());
 
 	// Our address is published to pkarr only once we have a relay, and an
 	// invite carries nothing but an id — so until this completes, a joiner
@@ -75,19 +80,19 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	// Bounded, because a daemon with no connectivity should still come up and
 	// answer `quix status`; the dialer retries once a relay appears.
 	match tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await {
-		Ok(()) => println!("online, reachable at: {:?}", endpoint.addr()),
-		Err(_) => eprintln!(
+		Ok(()) => crate::info!("online, reachable at: {:?}", endpoint.addr()),
+		Err(_) => crate::warn!(
 			"warning: no relay after {}s — peers may not be able to find us yet",
 			ONLINE_TIMEOUT.as_secs()
 		),
 	}
 
 	let (v4, v6) = tun::virtual_addrs(endpoint.id().as_bytes());
-	println!("virtual IPv6: {v6}");
-	println!("virtual IPv4: {v4}");
+	crate::info!("virtual IPv6: {v6}");
+	crate::info!("virtual IPv4: {v4}");
 
 	let tun_device = tun::create(v4, v6)?;
-	println!("tun device up: {}", tun::interface_name());
+	crate::info!("tun device up: {}", tun::interface_name());
 
 	let (dial_tx, dial_rx) = tokio::sync::mpsc::channel(DIAL_QUEUE);
 	let state = State::new(endpoint.clone(), tun_device, dial_tx)?;
@@ -120,10 +125,10 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 			if let Some(server) = zone_server {
 				match resolv::register(&iface, server).await {
 					Ok(()) => {
-						println!("registered *.{} with the system resolver", dns::ZONE);
+						crate::info!("registered *.{} with the system resolver", dns::ZONE);
 						registered = true;
 					}
-					Err(e) => eprintln!(
+					Err(e) => crate::warn!(
 						"warning: could not register *.{} with the system resolver: {e:#}\n\
 						 names still resolve via {}",
 						dns::ZONE,
@@ -133,7 +138,7 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 			}
 			tokio::spawn(dns::serve(state.clone(), sockets));
 		}
-		Err(e) => eprintln!("warning: resolver did not start: {e:#}"),
+		Err(e) => crate::warn!("warning: resolver did not start: {e:#}"),
 	}
 
 	tokio::spawn(mesh::tun_to_mesh(state.clone()));
@@ -142,7 +147,7 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	let result = tokio::select! {
 		served = ipc::serve(state) => served,
 		() = shutdown => {
-			println!("stopping");
+			crate::info!("stopping");
 			Ok(())
 		}
 	};
@@ -152,7 +157,7 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	// registry and would outlive us.
 	if registered {
 		if let Err(e) = resolv::deregister(&iface).await {
-			eprintln!("warning: could not release *.{}: {e:#}", dns::ZONE);
+			crate::warn!("warning: could not release *.{}: {e:#}", dns::ZONE);
 		}
 	}
 

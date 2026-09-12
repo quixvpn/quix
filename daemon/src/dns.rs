@@ -70,7 +70,7 @@ pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Option<SocketAddr>)>
 	let socket = UdpSocket::bind(testing)
 		.await
 		.with_context(|| format!("binding the {ZONE} resolver to {testing}"))?;
-	println!("resolver listening on {testing} for *.{ZONE}");
+	crate::info!("resolver listening on {testing} for *.{ZONE}");
 
 	let mut sockets = vec![socket];
 	let (v4, v6) = state.virtual_addrs();
@@ -82,11 +82,11 @@ pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Option<SocketAddr>)>
 		let addr = SocketAddr::new(addr, ZONE_PORT);
 		match bind_with_retry(addr).await {
 			Ok(socket) => {
-				println!("resolver listening on {addr} for *.{ZONE}");
+				crate::info!("resolver listening on {addr} for *.{ZONE}");
 				sockets.push(socket);
 				zone_server.get_or_insert(addr);
 			}
-			Err(e) => eprintln!("warning: resolver could not bind {addr}: {e:#}"),
+			Err(e) => crate::warn!("warning: resolver could not bind {addr}: {e:#}"),
 		}
 	}
 
@@ -129,7 +129,7 @@ async fn answer_loop(socket: UdpSocket, state: Arc<State>) {
 		let (len, from) = match socket.recv_from(&mut buf).await {
 			Ok(received) => received,
 			Err(e) => {
-				eprintln!("resolver read failed: {e}");
+				crate::warn!("resolver read failed: {e}");
 				continue;
 			}
 		};
@@ -138,10 +138,14 @@ async fn answer_loop(socket: UdpSocket, state: Arc<State>) {
 		let peers = resolvable(&state).await;
 		let network = state.network_name().await.map(|n| names::network_label(&n));
 		let Some(reply) = answer(&buf[..len], &peers, network.as_deref()) else {
-			continue; // unparseable; nothing useful to reply with
+			// Dropping it silently makes a client report a timeout, which is
+			// indistinguishable from the packet never arriving — the one thing
+			// worth knowing here is that it did.
+			crate::warn!("resolver could not parse a {len}-byte query from {from}");
+			continue;
 		};
 		if let Err(e) = socket.send_to(&reply, from).await {
-			eprintln!("resolver reply to {from} failed: {e}");
+			crate::warn!("resolver reply to {from} failed: {e}");
 		}
 	}
 }
@@ -377,6 +381,30 @@ mod tests {
 	}
 
 	#[test]
+	fn a_query_carrying_edns_is_still_answered() {
+		// Windows nslookup and most modern clients advertise EDNS0. If the OPT
+		// record made the query unparseable we would silently answer nothing,
+		// which the client reports as a timeout rather than an error.
+		let mut packet = Packet::new_query(1);
+		packet.questions.push(simple_dns::Question::new(
+			simple_dns::Name::new("nas.homelab.quix").unwrap(),
+			QTYPE::TYPE(simple_dns::TYPE::AAAA),
+			simple_dns::QCLASS::CLASS(CLASS::IN),
+			false,
+		));
+		packet.set_flags(simple_dns::PacketFlag::RECURSION_DESIRED);
+		packet.opt_mut().replace(simple_dns::rdata::OPT {
+			udp_packet_size: 4096,
+			version: 0,
+			opt_codes: Default::default(),
+		});
+
+		let bytes = packet.build_bytes_vec().unwrap();
+		let reply = answer(&bytes, &peers(), Some("homelab"));
+		assert!(reply.is_some(), "an EDNS query must still get a reply");
+	}
+
+	#[test]
 	fn garbage_is_not_answered_at_all() {
 		assert!(answer(b"not a dns packet", &peers(), Some("homelab")).is_none());
 	}
@@ -412,7 +440,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_real_dns_client_accepts_our_reply() {
 		let Ok(dig) = which_dig() else {
-			eprintln!("skipping: dig is not installed");
+			crate::warn!("skipping: dig is not installed");
 			return;
 		};
 

@@ -34,14 +34,14 @@ impl Routes {
 
 		for addr in wanted.difference(&installed) {
 			match self.add(*addr).await {
-				Ok(()) => println!("route added: {addr} dev {}", self.iface),
-				Err(e) => eprintln!("adding route for {addr} failed: {e}"),
+				Ok(()) => crate::info!("route added: {addr} dev {}", self.iface),
+				Err(e) => crate::warn!("adding route for {addr} failed: {e}"),
 			}
 		}
 
 		for addr in installed.difference(wanted) {
 			if let Err(e) = self.remove(*addr).await {
-				eprintln!("removing route for {addr} failed: {e}");
+				crate::warn!("removing route for {addr} failed: {e}");
 			}
 		}
 

@@ -32,7 +32,7 @@ pub fn run() -> bool {
 
 fn service_main(_args: Vec<OsString>) {
 	if let Err(e) = serve() {
-		eprintln!("service failed: {e}");
+		crate::warn!("service failed: {e}");
 	}
 }
 
@@ -75,7 +75,7 @@ fn serve() -> anyhow::Result<()> {
 	let exit_code = match &result {
 		Ok(()) => ServiceExitCode::Win32(0),
 		Err(e) => {
-			eprintln!("daemon exited with an error: {e:#}");
+			crate::warn!("daemon exited with an error: {e:#}");
 			ServiceExitCode::ServiceSpecific(1)
 		}
 	};

@@ -40,13 +40,17 @@ places (the unit and the Windows service's registry `Environment` key). A single
 `QUIX_STATE_DIR` that the individual paths derive from removes the whole class,
 with the per-file overrides kept for tests.
 
-### 3. `quix update` cannot fix a changed unit file
+### 3. `quix update` cannot fix service configuration
 
-It swaps binaries only. `v0.1.0` shipped a systemd unit missing
-`QUIX_SETTINGS_PATH`, and no amount of updating repairs that — the unit lives in
-`/etc/systemd/system/`, and only re-running the installer replaces it. Either
-`update` should refresh the unit when it changes, or it should notice and say
-"re-run the installer".
+It swaps binaries only. Service config — the systemd unit, the Windows
+registry environment — is written by the installer, so any release that changes
+one needs `install.sh` / `install.ps1` re-run rather than `quix update`. This
+has already bitten twice: a unit missing `QUIX_SETTINGS_PATH`, and again adding
+`QUIX_LOG_PATH`.
+
+`update` should at minimum compare the installed service config against the one
+in the release and say "re-run the installer" when they differ, rather than
+reporting success and leaving the daemon misconfigured.
 
 ### 4. A clearer error when the TUN name is taken
 

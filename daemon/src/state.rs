@@ -134,7 +134,7 @@ impl State {
 			Some(requested) => match m.claim_hostname(&requester_id, &requested, false) {
 				Ok(name) => Some(name),
 				Err(e) => {
-					eprintln!("hostname {requested:?} from {requester_id} refused: {e}");
+					crate::warn!("hostname {requested:?} from {requester_id} refused: {e}");
 					None
 				}
 			},
@@ -205,7 +205,7 @@ impl State {
 		// A refused rebinding is the security property doing its job, and the
 		// only signal the operator gets, so it must not be silent.
 		for conflict in &conflicts {
-			eprintln!("roster conflict: {conflict}");
+			crate::warn!("roster conflict: {conflict}");
 		}
 		*self.conflicts.lock().await = conflicts;
 

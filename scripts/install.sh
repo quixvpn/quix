@@ -66,6 +66,13 @@ fi
 
 [[ -f $STAGE/quix && -f $STAGE/quixd ]] || die "binaries missing from the package"
 
+# Overwriting a running binary truncates the file underneath the process, and
+# a unit rewritten under a live service is simply ignored. Stop first.
+if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+	info "stopping $SERVICE to replace it"
+	systemctl stop "$SERVICE"
+fi
+
 info "installing to $INSTALL_DIR"
 install -d "$INSTALL_DIR"
 install -m755 "$STAGE/quix" "$STAGE/quixd" "$INSTALL_DIR/"
@@ -76,7 +83,11 @@ sed "s|^ExecStart=.*|ExecStart=$INSTALL_DIR/quixd|" "$STAGE/quixd.service" > "$U
 chmod 644 "$UNIT_DIR/$SERVICE.service"
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE"
+systemctl enable "$SERVICE"
+# `enable --now` only starts a stopped unit, so it would silently leave an
+# upgrade running the old code. Restart says what we actually mean.
+systemctl reset-failed "$SERVICE" 2>/dev/null || true
+systemctl restart "$SERVICE"
 
 # systemd reports the unit active as soon as the process is up, which is before
 # the daemon has picked a relay (up to 10s), brought the TUN up and bound its
