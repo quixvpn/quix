@@ -66,6 +66,7 @@ fn is_read_only(req: &Request) -> bool {
 		| Request::Invite
 		| Request::Join { .. }
 		| Request::Leave
+		| Request::SetHostname { .. }
 		| Request::SetOperator { .. } => false,
 	}
 }
@@ -135,6 +136,7 @@ mod tests {
 	fn mutating() -> Request {
 		Request::CreateNetwork {
 			name: "net".to_string(),
+			hostname: None,
 		}
 	}
 

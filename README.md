@@ -148,6 +148,7 @@ QUIX_SOCKET=/tmp/quix.sock ./target/debug/quix status
 | `quix invite` | Mint a one-time invite code (coordinator only) |
 | `quix join <code>` | Join a network with an invite code |
 | `quix leave` | Leave the current network and drop every link |
+| `quix hostname <name>` | Set this machine's name on the mesh |
 | `quix status` | This node, its addresses, and every peer's link state |
 | `quix status -v` | Adds per-hop packet counters and full endpoint ids |
 | `quix ping <peer-id>` | Probe a peer's link and report RTT |
@@ -179,6 +180,49 @@ peers  1/1 linked
 
 `●` means the data-plane link is up, `○` means the peer is known but not
 currently reachable.
+
+### Names
+
+Every peer has a name under `.quix`. Set one when joining, or at any time after:
+
+```bash
+quix create homelab --hostname nas
+quix join <code> --hostname laptop
+sudo quix hostname nas          # set or change it later
+```
+
+A peer with no hostname still has one: the first 8 characters of its endpoint
+id, which is derived from its key and so can never be spoofed or reassigned.
+Both forms resolve.
+
+The coordinator resolves collisions by suffix — two peers asking for `web`
+become `web` and `web-1` — rather than refusing the join.
+
+**A name belongs to the key that first claimed it.** Only that peer can change
+it, and no roster push can move an existing name to a different key, including
+one from the coordinator. That holds even after the owner leaves: the name stays
+reserved, because a departure is only ever reported by the coordinator, and
+freeing it would let a compromised one evict a peer and take its name. A machine
+rebuilt under a new key reclaims its old name with `quix hostname <name>
+--force`, which every other member reports rather than applying silently.
+
+This is trust-on-first-use, with TOFU's limits: it protects bindings you have
+already seen, not the first one, and two peers that joined at different times
+can disagree without a signed roster. It is a cheaper mitigation than signing,
+not a replacement for it.
+
+### Resolving names
+
+The daemon answers `.quix` queries on a loopback port of its own. Nothing is
+registered with the OS yet, so point a resolver at it directly:
+
+```bash
+dig @127.0.0.1 -p 5354 nas.quix AAAA
+dig @127.0.0.1 -p 5354 dd0f06dd.quix A     # the fallback name works too
+```
+
+Override the address with `QUIX_DNS_ADDR`. Making `.quix` work for ordinary
+programs — systemd-resolved on Linux, NRPT on Windows — is separate work.
 
 ### Controlling the daemon
 
@@ -286,7 +330,9 @@ Being explicit about what isn't built yet:
 - **The roster is unsigned.** Members trust the coordinator by identity alone,
   and it must be online to admit anyone. No DHT-published signed record yet, so
   admission doesn't survive the coordinator being away.
-- **No name resolution.** Peers are reached by address, not by name.
+- **`.quix` names are not wired into the OS resolver.** The daemon answers them
+  on its own loopback port; ordinary programs won't find them until
+  systemd-resolved and NRPT integration lands.
 - **No `quix up` / `down`,** and no way to pause without stopping the daemon.
 - **Path MTU.** A link that settles below 1280 bytes drops large packets rather
   than fragmenting them.

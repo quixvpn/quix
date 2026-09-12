@@ -1,11 +1,13 @@
 mod admin;
 mod authz;
 mod connect;
+mod dns;
 mod handler;
 mod identity;
 mod ipc;
 mod membership;
 mod mesh;
+mod names;
 mod peers;
 mod routes;
 #[cfg(windows)]
@@ -102,6 +104,17 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 			},
 		)
 		.spawn();
+
+	// The resolver is not essential to the mesh: a failure to bind it should
+	// not stop the daemon carrying traffic.
+	{
+		let state = state.clone();
+		tokio::spawn(async move {
+			if let Err(e) = dns::serve(state).await {
+				eprintln!("resolver stopped: {e:#}");
+			}
+		});
+	}
 
 	tokio::spawn(mesh::tun_to_mesh(state.clone()));
 	tokio::spawn(mesh::dialer(state.clone(), dial_rx));

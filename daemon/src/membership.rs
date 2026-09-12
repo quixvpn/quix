@@ -1,16 +1,60 @@
 use anyhow::{Context, Result};
 use iroh::EndpointId;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+
+use crate::names;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Membership {
 	pub network_name: Option<String>,
 	pub coordinator_id: Option<String>,
-	pub members: HashSet<String>,
+	pub members: Vec<Member>,
 	#[serde(default, with = "hex_tokens")]
 	pending_invites: HashSet<[u8; 16]>,
+	/// Which key owns each hostname, including names whose owner has since
+	/// left. Entries are never rewritten to a different key, so a roster push
+	/// cannot silently redirect a name that is already in use — see
+	/// `set_roster`. Reclaiming one takes a deliberate, announced override.
+	#[serde(default)]
+	bindings: BTreeMap<String, String>,
+}
+
+/// One peer in the roster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Member {
+	pub id: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub hostname: Option<String>,
+}
+
+impl Member {
+	pub fn new(id: String) -> Self {
+		Self { id, hostname: None }
+	}
+}
+
+impl<'de> Deserialize<'de> for Member {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		// Rosters written before hostnames existed were a bare list of endpoint
+		// ids. Accept both shapes so an existing network.json still loads.
+		#[derive(Deserialize)]
+		#[serde(untagged)]
+		enum Repr {
+			Legacy(String),
+			Full {
+				id: String,
+				#[serde(default)]
+				hostname: Option<String>,
+			},
+		}
+
+		Ok(match Repr::deserialize(deserializer)? {
+			Repr::Legacy(id) => Member::new(id),
+			Repr::Full { id, hostname } => Member { id, hostname },
+		})
+	}
 }
 
 /// Invite tokens are 16 raw bytes in memory but hex on disk. Serde would
@@ -72,14 +116,15 @@ impl Membership {
 		Ok(())
 	}
 
-	pub fn create(&mut self, name: String, own_id: String) {
+	pub fn create(&mut self, name: String, own_id: String, hostname: Option<String>) {
 		self.network_name = Some(name);
 		self.coordinator_id = Some(own_id.clone());
-		self.members.insert(own_id);
-	}
-
-	pub fn is_coordinator(&self, own_id: &str) -> bool {
-		self.coordinator_id.as_deref() == Some(own_id)
+		self.members = vec![Member::new(own_id.clone())];
+		if let Some(hostname) = hostname {
+			// Validated by the caller; we are the coordinator and alone, so
+			// there is nothing yet to collide with.
+			self.bind(&own_id, &hostname);
+		}
 	}
 
 	/// Mints a one-time invite, returning the full shareable code (id + token,
@@ -107,13 +152,94 @@ impl Membership {
 		Ok((id, token))
 	}
 
-	pub fn redeem_invite(&mut self, token: &[u8; 16], requester_id: String) -> bool {
-		if self.pending_invites.remove(token) {
-			self.members.insert(requester_id);
-			true
-		} else {
-			false
+	pub fn is_coordinator(&self, own_id: &str) -> bool {
+		self.coordinator_id.as_deref() == Some(own_id)
+	}
+
+	pub fn member(&self, id: &str) -> Option<&Member> {
+		self.members.iter().find(|m| m.id == id)
+	}
+
+	pub fn is_member(&self, id: &str) -> bool {
+		self.member(id).is_some()
+	}
+
+	pub fn hostname_of(&self, id: &str) -> Option<&str> {
+		self.member(id)?.hostname.as_deref()
+	}
+
+	/// The roster, ordered so saving twice produces the same file.
+	pub fn roster(&self) -> Vec<Member> {
+		let mut roster = self.members.clone();
+		roster.sort_by(|a, b| a.id.cmp(&b.id));
+		roster
+	}
+
+	/// Records a hostname as belonging to a key, in both the roster and the
+	/// binding table.
+	fn bind(&mut self, id: &str, hostname: &str) {
+		self.bindings.insert(hostname.to_string(), id.to_string());
+		if let Some(member) = self.members.iter_mut().find(|m| m.id == id) {
+			member.hostname = Some(hostname.to_string());
 		}
+	}
+
+	/// Whether a name belongs to some other key — a live member's, a departed
+	/// member's tombstone, or another member's unforgeable fallback.
+	fn spoken_for(&self, name: &str, claimant: &str) -> bool {
+		let bound_elsewhere = self
+			.bindings
+			.get(name)
+			.is_some_and(|owner| owner != claimant);
+
+		let shadows_a_fallback = self
+			.members
+			.iter()
+			.any(|m| m.id != claimant && names::fallback(&m.id) == name);
+
+		bound_elsewhere || shadows_a_fallback
+	}
+
+	/// Coordinator side of a hostname claim: validates, resolves collisions by
+	/// suffix, and records the binding. Returns the name actually assigned,
+	/// which may differ from the one requested.
+	///
+	/// Bindings are append-only — a name never moves to a different key here,
+	/// which is what stops a later roster push from redirecting it. `force`
+	/// exists for the one case that cannot be served otherwise: a machine
+	/// rebuilt under a new key reclaiming the name it used to hold.
+	pub fn claim_hostname(
+		&mut self,
+		claimant: &str,
+		requested: &str,
+		force: bool,
+	) -> Result<String, String> {
+		let wanted = names::validate(requested, claimant)?;
+
+		if force {
+			self.bindings.remove(&wanted);
+			// The previous holder keeps its roster entry but loses the name,
+			// so two members never claim it at once.
+			if let Some(previous) = self.members.iter_mut().find(|m| m.hostname.as_deref() == Some(wanted.as_str())) {
+				previous.hostname = None;
+			}
+		}
+
+		let assigned = names::dedupe(&wanted, claimant, |candidate| {
+			self.spoken_for(candidate, claimant)
+		});
+		self.bind(claimant, &assigned);
+		Ok(assigned)
+	}
+
+	pub fn redeem_invite(&mut self, token: &[u8; 16], requester_id: String) -> bool {
+		if !self.pending_invites.remove(token) {
+			return false;
+		}
+		if !self.is_member(&requester_id) {
+			self.members.push(Member::new(requester_id));
+		}
+		true
 	}
 
 	/// Records the network we were admitted to, along with the roster the
@@ -124,56 +250,101 @@ impl Membership {
 		coordinator_id: String,
 		own_id: String,
 		name: Option<String>,
-		roster: Vec<String>,
+		roster: Vec<Member>,
 	) {
 		self.coordinator_id = Some(coordinator_id.clone());
 		self.network_name = name;
 		self.members.clear();
-		self.members.insert(coordinator_id);
-		self.members.insert(own_id);
-		self.members.extend(roster);
+		// A fresh network means no prior bindings to honour; everything in this
+		// first roster is what we pin from here on.
+		self.bindings.clear();
+		self.apply_roster(&own_id, roster);
 	}
 
-	/// Applies a roster pushed by the coordinator. We keep ourselves in it
-	/// unconditionally so a malformed push can't evict us from our own network.
-	pub fn set_roster(&mut self, own_id: String, name: Option<String>, roster: Vec<String>) {
+	/// Applies a roster pushed by the coordinator, refusing any hostname that
+	/// would move to a different key than the one we first saw holding it.
+	///
+	/// Returns a description of each refusal, for logging and for `status`.
+	/// This is where the binding rule actually bites: enforcing it only at the
+	/// coordinator would do nothing against a coordinator that is itself the
+	/// problem.
+	pub fn set_roster(
+		&mut self,
+		own_id: &str,
+		name: Option<String>,
+		roster: Vec<Member>,
+	) -> Vec<String> {
 		if name.is_some() {
 			self.network_name = name;
 		}
-		self.members = roster.into_iter().collect();
-		self.members.insert(own_id);
-		if let Some(coordinator) = self.coordinator_id.clone() {
-			self.members.insert(coordinator);
-		}
+		self.members.clear();
+		self.apply_roster(own_id, roster)
 	}
 
-	/// Forgets the network entirely. Invites are dropped too — they are only
-	/// meaningful while we are the coordinator of this network.
+	fn apply_roster(&mut self, own_id: &str, roster: Vec<Member>) -> Vec<String> {
+		let mut conflicts = Vec::new();
+
+		for mut member in roster {
+			if let Some(hostname) = member.hostname.clone() {
+				match self.bindings.get(&hostname) {
+					Some(owner) if owner != &member.id => {
+						conflicts.push(format!(
+							"{hostname} belongs to {}; refused to rebind it to {}",
+							names::fallback(owner),
+							names::fallback(&member.id)
+						));
+						// Drop the disputed name but keep the member: naming and
+						// reachability should not fail together.
+						member.hostname = None;
+					}
+					_ => {
+						self.bindings.insert(hostname, member.id.clone());
+					}
+				}
+			}
+			if !self.is_member(&member.id) {
+				self.members.push(member);
+			}
+		}
+
+		// We and the coordinator stay in our own roster whatever arrives, so a
+		// malformed push cannot evict us from our own network.
+		for id in [Some(own_id.to_string()), self.coordinator_id.clone()]
+			.into_iter()
+			.flatten()
+		{
+			if !self.is_member(&id) {
+				self.members.push(Member::new(id));
+			}
+		}
+
+		conflicts
+	}
+
+	/// Forgets the network entirely. Invites and bindings go too — they only
+	/// describe the network we are leaving.
 	pub fn leave(&mut self) {
 		self.network_name = None;
 		self.coordinator_id = None;
 		self.members.clear();
 		self.pending_invites.clear();
+		self.bindings.clear();
 	}
 
 	/// Coordinator side of someone leaving. Returns whether they were listed.
+	///
+	/// Their hostname binding is deliberately kept: a departure is only ever
+	/// reported to other members by the coordinator, so freeing the name here
+	/// would let a compromised one evict a peer and take its name.
 	pub fn remove_member(&mut self, id: &str) -> bool {
-		self.members.remove(id)
-	}
-
-	pub fn is_member(&self, id: &str) -> bool {
-		self.members.contains(id)
-	}
-
-	pub fn roster(&self) -> Vec<String> {
-		let mut roster: Vec<String> = self.members.iter().cloned().collect();
-		roster.sort();
-		roster
+		let before = self.members.len();
+		self.members.retain(|m| m.id != id);
+		before != self.members.len()
 	}
 
 	/// The roster as endpoint ids, skipping any entry that doesn't parse.
 	pub fn member_ids(&self) -> Vec<EndpointId> {
-		self.members.iter().filter_map(|id| id.parse().ok()).collect()
+		self.members.iter().filter_map(|m| m.id.parse().ok()).collect()
 	}
 }
 #[cfg(test)]
@@ -216,10 +387,21 @@ mod tests {
 		assert!(Membership::decode_invite("abc").is_err(), "too short");
 	}
 
+	fn member(n: u8) -> Member {
+		Member::new(id(n))
+	}
+
+	fn named(n: u8, hostname: &str) -> Member {
+		Member {
+			id: id(n),
+			hostname: Some(hostname.to_string()),
+		}
+	}
+
 	#[test]
 	fn joining_trusts_the_whole_roster_not_just_the_coordinator() {
 		let mut m = Membership::default();
-		m.set_joined(id(1), id(2), Some("gaming".into()), vec![id(1), id(3)]);
+		m.set_joined(id(1), id(2), Some("gaming".into()), vec![member(1), member(3)]);
 
 		// Without the roster, members 2 and 3 would reject each other.
 		assert!(m.is_member(&id(3)), "peers admitted before us must be trusted");
@@ -232,7 +414,7 @@ mod tests {
 		let mut m = Membership::default();
 		m.set_joined(id(1), id(2), Some("gaming".into()), vec![]);
 
-		m.set_roster(id(2), None, vec![id(3)]);
+		m.set_roster(&id(2), None, vec![member(3)]);
 
 		assert!(m.is_member(&id(2)), "we stay in our own network");
 		assert!(m.is_member(&id(1)), "the coordinator stays");
@@ -240,38 +422,150 @@ mod tests {
 	}
 
 	#[test]
-	fn on_disk_tokens_are_hex_and_survive_a_round_trip() {
-		// Shaped like a real ~/.config/quix/network.json.
-		let stored = r#"{
-			"network_name": "my-net",
-			"coordinator_id": "5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",
-			"members": ["5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257"],
-			"pending_invites": ["bfc15e2af04b02803f18d1f735eaedad"]
-		}"#;
+	fn a_hostname_is_carried_by_the_roster() {
+		let mut m = Membership::default();
+		m.set_joined(id(1), id(2), None, vec![named(1, "nas")]);
 
-		let mut m: Membership = serde_json::from_str(stored).expect("stored file must parse");
-		assert_eq!(m.network_name.as_deref(), Some("my-net"));
-
-		let token = hex::decode("bfc15e2af04b02803f18d1f735eaedad").unwrap();
-		let token: [u8; 16] = token.try_into().unwrap();
-		assert!(m.redeem_invite(&token, id(2)), "the stored invite must still redeem");
-
-		// Saving writes hex back, not a 16-element number array.
-		let written = serde_json::to_string(&Membership::default()).unwrap();
-		assert!(written.contains(r#""pending_invites":[]"#), "got {written}");
+		assert_eq!(m.hostname_of(&id(1)), Some("nas"));
+		assert_eq!(m.hostname_of(&id(2)), None, "we asked for no name");
 	}
 
 	#[test]
-	fn tokens_of_the_wrong_length_are_rejected() {
-		let stored = r#"{"members":[],"pending_invites":["ab"]}"#;
-		assert!(serde_json::from_str::<Membership>(stored).is_err());
+	fn a_claimed_name_cannot_be_rebound_to_another_key() {
+		let mut m = Membership::default();
+		m.set_joined(id(1), id(2), None, vec![named(1, "nas")]);
+
+		// The coordinator now claims `nas` belongs to a different peer. This is
+		// the vector the binding rule exists to close.
+		let conflicts = m.set_roster(&id(2), None, vec![named(3, "nas")]);
+
+		assert_eq!(conflicts.len(), 1, "the refusal must be reported");
+		assert!(conflicts[0].contains("nas"));
+		assert_eq!(m.hostname_of(&id(3)), None, "the name was not handed over");
+		assert!(m.is_member(&id(3)), "but the peer is still reachable");
+	}
+
+	#[test]
+	fn the_same_key_keeps_its_own_name_across_pushes() {
+		let mut m = Membership::default();
+		m.set_joined(id(1), id(2), None, vec![named(1, "nas")]);
+
+		let conflicts = m.set_roster(&id(2), None, vec![named(1, "nas")]);
+
+		assert!(conflicts.is_empty(), "re-asserting the same binding is fine");
+		assert_eq!(m.hostname_of(&id(1)), Some("nas"));
+	}
+
+	#[test]
+	fn the_coordinator_deduplicates_a_taken_name() {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), Some("web".into()));
+		m.members.push(Member::new(id(2)));
+
+		assert_eq!(m.claim_hostname(&id(2), "web", false), Ok("web-1".to_string()));
+		assert_eq!(m.hostname_of(&id(1)), Some("web"), "the first holder keeps it");
+	}
+
+	#[test]
+	fn a_name_stays_reserved_after_its_owner_leaves() {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), None);
+		m.members.push(Member::new(id(2)));
+		m.claim_hostname(&id(2), "nas", false).unwrap();
+
+		assert!(m.remove_member(&id(2)));
+		m.members.push(Member::new(id(3)));
+
+		// Departures are only ever reported by the coordinator, so freeing the
+		// name here would let a compromised one evict a peer and take its name.
+		assert_eq!(m.claim_hostname(&id(3), "nas", false), Ok("nas-1".to_string()));
+	}
+
+	#[test]
+	fn a_peer_can_return_to_a_name_it_previously_held() {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), Some("web".into()));
+
+		m.claim_hostname(&id(1), "nas", false).unwrap();
+		// Its own tombstone is not an obstacle to itself.
+		assert_eq!(m.claim_hostname(&id(1), "web", false), Ok("web".to_string()));
+	}
+
+	#[test]
+	fn a_forced_claim_takes_the_name_from_the_previous_holder() {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), Some("nas".into()));
+		m.members.push(Member::new(id(2)));
+
+		// The rebuilt-machine case: a new key reclaiming a name whose original
+		// holder is gone.
+		assert_eq!(m.claim_hostname(&id(2), "nas", true), Ok("nas".to_string()));
+		assert_eq!(m.hostname_of(&id(2)), Some("nas"));
+		assert_eq!(m.hostname_of(&id(1)), None, "two peers never share a name");
+	}
+
+	#[test]
+	fn a_name_shaped_like_another_peers_fallback_is_refused() {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), None);
+		m.members.push(Member::new(id(2)));
+
+		let shadow = names::fallback(&id(1));
+		assert!(m.claim_hostname(&id(2), &shadow, false).is_err());
+	}
+
+	#[test]
+	fn leaving_forgets_the_bindings_of_the_network_we_left() {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), Some("nas".into()));
+		m.leave();
+
+		assert_eq!(m.hostname_of(&id(1)), None);
+		assert!(m.members.is_empty());
+	}
+
+	#[test]
+	fn a_roster_written_before_hostnames_still_loads() {
+		// Exactly the shape v0.1.x wrote: members as bare id strings, and no
+		// bindings key at all.
+		let stored = r#"{
+			"network_name": "minha-rede",
+			"coordinator_id": "5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",
+			"members": [
+				"5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",
+				"dd0f06ddf61e34843f314341496c325238a0bef930431403d0aae6c332a448d2"
+			],
+			"pending_invites": ["bfc15e2af04b02803f18d1f735eaedad"]
+		}"#;
+
+		let m: Membership = serde_json::from_str(stored).expect("an existing file must load");
+
+		assert_eq!(m.members.len(), 2);
+		assert!(m.members.iter().all(|member| member.hostname.is_none()));
+		assert!(m.is_member("dd0f06ddf61e34843f314341496c325238a0bef930431403d0aae6c332a448d2"));
+	}
+
+	#[test]
+	fn both_roster_shapes_parse_and_save_in_the_new_one() {
+		let mixed = r#"{
+			"members": ["aa", {"id": "bb", "hostname": "nas"}]
+		}"#;
+
+		let m: Membership = serde_json::from_str(mixed).unwrap();
+		assert_eq!(m.hostname_of("bb"), Some("nas"));
+		assert_eq!(m.hostname_of("aa"), None);
+
+		// Saving normalises to the object form.
+		let written = serde_json::to_string(&m).unwrap();
+		assert!(written.contains(r#"{"id":"aa"}"#), "got {written}");
+		assert!(written.contains(r#"{"id":"bb","hostname":"nas"}"#), "got {written}");
 	}
 
 	#[test]
 	fn member_ids_skips_unparseable_entries() {
 		let mut m = Membership::default();
-		m.members.insert(id(1));
-		m.members.insert("garbage".to_string());
+		m.members.push(member(1));
+		m.members.push(Member::new("garbage".to_string()));
 
 		assert_eq!(m.member_ids().len(), 1);
 	}

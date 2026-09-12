@@ -4,14 +4,16 @@ use iroh::{Endpoint, EndpointId};
 use std::time::Duration;
 
 use crate::admin::{AdminRequest, AdminResponse, ADMIN_ALPN};
-use crate::membership::Membership;
+use crate::membership::{Member, Membership};
 use crate::state::State;
 
 /// What a join returned: the network's name and the roster to start from.
 pub struct Admission {
 	pub coordinator_id: EndpointId,
 	pub network_name: Option<String>,
-	pub members: Vec<String>,
+	pub members: Vec<Member>,
+	/// The hostname the coordinator assigned, if one was requested.
+	pub hostname: Option<String>,
 }
 
 /// Result of probing a peer over the mesh.
@@ -76,7 +78,11 @@ async fn wait_for_link(state: &State, id: EndpointId) -> Option<iroh::endpoint::
 /// Reaching the coordinator is retried: a coordinator that just came up may not
 /// have finished publishing its address, and resolving it is the one step of a
 /// join that depends on something outside both peers.
-pub async fn join_network(endpoint: &Endpoint, code: &str) -> Result<Admission> {
+pub async fn join_network(
+	endpoint: &Endpoint,
+	code: &str,
+	hostname: Option<String>,
+) -> Result<Admission> {
 	let (coordinator_id, token) = Membership::decode_invite(code)?;
 
 	let mut last_error = None;
@@ -89,6 +95,7 @@ pub async fn join_network(endpoint: &Endpoint, code: &str) -> Result<Admission> 
 
 		let req = AdminRequest::Join {
 			token_hex: hex::encode(token),
+			hostname: hostname.clone(),
 		};
 
 		match admin_call(endpoint, coordinator_id, req).await {
@@ -113,13 +120,15 @@ pub async fn join_network(endpoint: &Endpoint, code: &str) -> Result<Admission> 
 		AdminResponse::Joined {
 			network_name,
 			members,
+			hostname,
 		} => Ok(Admission {
 			coordinator_id,
 			network_name,
 			members,
+			hostname,
 		}),
 		AdminResponse::Error { message } => anyhow::bail!(message),
-		AdminResponse::Ack => anyhow::bail!("unexpected response to join"),
+		other => anyhow::bail!("unexpected response to join: {other:?}"),
 	}
 }
 
@@ -129,7 +138,7 @@ pub async fn notify_leave(endpoint: &Endpoint, coordinator: EndpointId) -> Resul
 	match admin_call(endpoint, coordinator, AdminRequest::Leave).await? {
 		AdminResponse::Ack => Ok(()),
 		AdminResponse::Error { message } => anyhow::bail!(message),
-		AdminResponse::Joined { .. } => anyhow::bail!("unexpected response to leave"),
+		other => anyhow::bail!("unexpected response to leave: {other:?}"),
 	}
 }
 
@@ -138,7 +147,7 @@ pub async fn push_roster(
 	endpoint: &Endpoint,
 	to: EndpointId,
 	network_name: Option<String>,
-	members: Vec<String>,
+	members: Vec<Member>,
 ) -> Result<()> {
 	let req = AdminRequest::Roster {
 		network_name,
@@ -148,7 +157,23 @@ pub async fn push_roster(
 	match admin_call(endpoint, to, req).await? {
 		AdminResponse::Ack => Ok(()),
 		AdminResponse::Error { message } => anyhow::bail!(message),
-		AdminResponse::Joined { .. } => anyhow::bail!("unexpected response to roster push"),
+		other => anyhow::bail!("unexpected response to roster push: {other:?}"),
+	}
+}
+
+/// Member → coordinator: claim a hostname, returning the name assigned, which
+/// may carry a suffix if the requested one was taken.
+pub async fn claim_hostname(
+	endpoint: &Endpoint,
+	coordinator: EndpointId,
+	hostname: String,
+) -> Result<String> {
+	let req = AdminRequest::SetHostname { hostname };
+
+	match admin_call(endpoint, coordinator, req).await? {
+		AdminResponse::HostnameSet { hostname } => Ok(hostname),
+		AdminResponse::Error { message } => anyhow::bail!(message),
+		other => anyhow::bail!("unexpected response to hostname claim: {other:?}"),
 	}
 }
 

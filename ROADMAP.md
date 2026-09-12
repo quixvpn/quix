@@ -110,11 +110,27 @@ anyone. Publishing a signed network record (pkarr, as iroh already uses for
 address discovery) would let admission survive the coordinator being away, and
 make the roster verifiable rather than merely received over a trusted link.
 
-### Name resolution
+### OS-level DNS registration
 
-Peers are reached by address today. `name.network.quix` would need a DNS
-responder bound to a mesh address plus host resolver integration —
-systemd-resolved and `resolv.conf` on Linux, NRPT on Windows.
+The resolver exists and answers `.quix` on a loopback port, but nothing tells
+the system about it, so ordinary programs cannot use those names. Needs
+systemd-resolved and `resolv.conf` handling on Linux, NRPT on Windows, and
+binding to a mesh address rather than loopback.
+
+### Converging a refused name rebinding
+
+A member that has pinned `nas` to one key refuses a push binding it to another,
+which is the point — but it then disagrees with the coordinator permanently.
+`quix hostname --force` fixes the coordinator's view; there is no way to tell an
+individual member to accept a rebinding it has refused. Signed rosters would
+settle this properly; a local pin-reset command would be the cheap stopgap.
+
+### Hostnames assume one network
+
+Names live in the single flat `Membership`, and the zone is `name.quix`. With
+several networks a peer could hold a different name in each, and the zone wants
+to be `name.network.quix`. The resolver already matches the zone as a suffix so
+the extra label can be added without reworking the query path.
 
 ### Standby and member removal
 

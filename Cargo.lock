@@ -2798,6 +2798,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "simple-dns",
  "tokio",
  "tun-rs",
  "uzers",

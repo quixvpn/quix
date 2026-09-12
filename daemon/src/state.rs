@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tun_rs::AsyncDevice;
 
-use crate::membership::Membership;
+use crate::membership::{Member, Membership};
 use crate::peers::Peers;
 use crate::routes::Routes;
 use crate::settings::Settings;
@@ -22,6 +22,8 @@ pub struct State {
 	peers: Peers,
 	routes: Routes,
 	stats: Stats,
+	/// Naming conflicts reported by the last roster push.
+	conflicts: Arc<Mutex<Vec<String>>>,
 	dial_tx: mpsc::Sender<EndpointId>,
 }
 
@@ -45,6 +47,7 @@ impl State {
 			peers: Peers::default(),
 			routes: Routes::new(crate::tun::interface_name()),
 			stats: Stats::default(),
+			conflicts: Arc::new(Mutex::new(Vec::new())),
 			dial_tx,
 		})
 	}
@@ -93,9 +96,9 @@ impl State {
 		let _ = self.dial_tx.try_send(id);
 	}
 
-	pub async fn create_network(&self, name: String) -> Result<()> {
+	pub async fn create_network(&self, name: String, hostname: Option<String>) -> Result<()> {
 		let mut m = self.membership.lock().await;
-		m.create(name, self.own_id().to_string());
+		m.create(name, self.own_id().to_string(), hostname);
 		m.save()?;
 		drop(m);
 		self.refresh_routes().await;
@@ -111,23 +114,78 @@ impl State {
 
 	/// Coordinator side of a join: admits the requester and returns the roster
 	/// they should start with, or None if the token was bad.
-	pub async fn redeem_invite(&self, token: &[u8; 16], requester_id: String) -> Result<Option<Vec<String>>> {
+	/// Coordinator side of a join: admits the requester, assigns the hostname
+	/// they asked for (or a deduplicated variant), and returns the roster they
+	/// should start with plus the name they actually got.
+	pub async fn redeem_invite(
+		&self,
+		token: &[u8; 16],
+		requester_id: String,
+		hostname: Option<String>,
+	) -> Result<Option<(Vec<Member>, Option<String>)>> {
 		let mut m = self.membership.lock().await;
-		if !m.redeem_invite(token, requester_id) {
+		if !m.redeem_invite(token, requester_id.clone()) {
 			return Ok(None);
 		}
+
+		let assigned = match hostname {
+			// A rejected hostname must not fail the join — they are in the
+			// network either way, reachable by their fallback name.
+			Some(requested) => match m.claim_hostname(&requester_id, &requested, false) {
+				Ok(name) => Some(name),
+				Err(e) => {
+					eprintln!("hostname {requested:?} from {requester_id} refused: {e}");
+					None
+				}
+			},
+			None => None,
+		};
+
 		m.save()?;
 		let roster = m.roster();
 		drop(m);
 		self.refresh_routes().await;
-		Ok(Some(roster))
+		Ok(Some((roster, assigned)))
+	}
+
+	/// Coordinator side of a hostname claim, used both for our own name and for
+	/// a member asking over the admin protocol.
+	pub async fn claim_hostname(
+		&self,
+		claimant: &str,
+		requested: &str,
+		force: bool,
+	) -> Result<std::result::Result<String, String>> {
+		let mut m = self.membership.lock().await;
+		let outcome = m.claim_hostname(claimant, requested, force);
+		if outcome.is_ok() {
+			m.save()?;
+		}
+		Ok(outcome)
+	}
+
+	/// Member side: adopt the name the coordinator assigned us.
+	pub async fn adopt_hostname(&self, hostname: String) -> Result<()> {
+		let own_id = self.own_id().to_string();
+		let mut m = self.membership.lock().await;
+		m.claim_hostname(&own_id, &hostname, true).map_err(|e| anyhow::anyhow!(e))?;
+		m.save()
+	}
+
+	pub async fn hostname(&self) -> Option<String> {
+		let own_id = self.own_id().to_string();
+		self.membership
+			.lock()
+			.await
+			.hostname_of(&own_id)
+			.map(str::to_string)
 	}
 
 	pub async fn set_joined(
 		&self,
 		coordinator_id: String,
 		name: Option<String>,
-		roster: Vec<String>,
+		roster: Vec<Member>,
 	) -> Result<()> {
 		let mut m = self.membership.lock().await;
 		m.set_joined(coordinator_id, self.own_id().to_string(), name, roster);
@@ -137,13 +195,27 @@ impl State {
 		Ok(())
 	}
 
-	pub async fn set_roster(&self, name: Option<String>, roster: Vec<String>) -> Result<()> {
+	pub async fn set_roster(&self, name: Option<String>, roster: Vec<Member>) -> Result<()> {
+		let own_id = self.own_id().to_string();
 		let mut m = self.membership.lock().await;
-		m.set_roster(self.own_id().to_string(), name, roster);
+		let conflicts = m.set_roster(&own_id, name, roster);
 		m.save()?;
 		drop(m);
+
+		// A refused rebinding is the security property doing its job, and the
+		// only signal the operator gets, so it must not be silent.
+		for conflict in &conflicts {
+			eprintln!("roster conflict: {conflict}");
+		}
+		*self.conflicts.lock().await = conflicts;
+
 		self.refresh_routes().await;
 		Ok(())
+	}
+
+	/// Naming conflicts from the most recent roster push, surfaced in `status`.
+	pub async fn conflicts(&self) -> Vec<String> {
+		self.conflicts.lock().await.clone()
 	}
 
 	/// Leaves the network: forgets the roster, tears down the routes it put in
@@ -202,7 +274,35 @@ impl State {
 		self.membership.lock().await.network_name.clone()
 	}
 
-	pub async fn roster(&self) -> Vec<String> {
+	pub async fn roster(&self) -> Vec<Member> {
 		self.membership.lock().await.roster()
+	}
+
+	/// Every member's id and overlay addresses, including our own — the
+	/// resolver has to answer for this node as well as its peers.
+	pub async fn all_addrs(&self) -> Vec<(String, Ipv4Addr, Ipv6Addr)> {
+		self.membership
+			.lock()
+			.await
+			.roster()
+			.into_iter()
+			.map(|m| {
+				let (v4, v6) = crate::tun::virtual_addrs(
+					&m.id.parse::<EndpointId>().map(|id| id.as_bytes().to_vec()).unwrap_or_default(),
+				);
+				(m.id, v4, v6)
+			})
+			.collect()
+	}
+
+	/// Hostnames by endpoint id, for status rendering and DNS answers.
+	pub async fn hostnames(&self) -> std::collections::HashMap<String, String> {
+		self.membership
+			.lock()
+			.await
+			.roster()
+			.into_iter()
+			.filter_map(|m| m.hostname.map(|h| (m.id, h)))
+			.collect()
 	}
 }

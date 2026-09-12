@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use interprocess::local_socket::tokio::{prelude::*, Listener, Stream};
 use interprocess::local_socket::ListenerOptions;
 use proto::{PeerStatus, Request, Response, Traffic};
@@ -115,17 +115,25 @@ async fn dispatch(req: Request, state: &State) -> Response {
 		},
 
 		Request::Status => {
+			let hostnames = state.hostnames().await;
+			let own_hostname = state.hostname().await;
 			let peers = state
 				.peers()
 				.snapshot()
 				.await
 				.into_iter()
-				.map(|row| PeerStatus {
-					id: row.id.to_string(),
-					v6: row.v6.to_string(),
-					v4: row.v4.to_string(),
-					linked: row.linked,
-					datagram_max: row.datagram_max.map(|max| max as u32),
+				.map(|row| {
+					let id = row.id.to_string();
+					let hostname = hostnames.get(&id).cloned();
+					PeerStatus {
+						name: crate::names::display(&id, hostname.as_deref()),
+						named: hostname.is_some(),
+						id,
+						v6: row.v6.to_string(),
+						v4: row.v4.to_string(),
+						linked: row.linked,
+						datagram_max: row.datagram_max.map(|max| max as u32),
+					}
 				})
 				.collect();
 
@@ -144,15 +152,18 @@ async fn dispatch(req: Request, state: &State) -> Response {
 					tun_tx_err: s.tun_tx_err,
 				},
 				endpoint_id: state.own_id().to_string(),
+				name: crate::names::display(&state.own_id().to_string(), own_hostname.as_deref()),
+				named: own_hostname.is_some(),
 				v6: v6.to_string(),
 				v4: v4.to_string(),
 				network: state.network_name().await,
 				coordinator: state.is_coordinator().await,
 				peers,
+				conflicts: state.conflicts().await,
 			}
 		}
 
-		Request::CreateNetwork { name } => match state.create_network(name).await {
+		Request::CreateNetwork { name, hostname } => match create_network(state, name, hostname).await {
 			Ok(()) => Response::Ok {
 				echo: "network created".to_string(),
 			},
@@ -170,6 +181,14 @@ async fn dispatch(req: Request, state: &State) -> Response {
 				Err(e) => error(e),
 			}
 		}
+
+		Request::SetHostname { hostname, force } => match set_hostname(state, &hostname, force).await {
+			Ok(assigned) => Response::HostnameSet {
+				hostname: assigned,
+				requested: hostname,
+			},
+			Err(e) => error(e),
+		},
 
 		Request::SetOperator { user } => match authz::resolve_user(&user) {
 			Ok(uid) => match state.set_operator(user.clone(), uid).await {
@@ -206,9 +225,12 @@ async fn dispatch(req: Request, state: &State) -> Response {
 			}
 		}
 
-		Request::Join { code } => match crate::connect::join_network(state.endpoint(), &code).await {
+		Request::Join { code, hostname } => match crate::connect::join_network(state.endpoint(), &code, hostname).await {
 			Ok(admission) => {
 				let name = admission.network_name.clone();
+				// May differ from what was requested: the coordinator resolves
+				// collisions, so tell the user which name they actually got.
+				let assigned = admission.hostname.clone();
 				match state
 					.set_joined(
 						admission.coordinator_id.to_string(),
@@ -217,12 +239,68 @@ async fn dispatch(req: Request, state: &State) -> Response {
 					)
 					.await
 				{
-					Ok(()) => Response::Joined { network_name: name },
+					Ok(()) => Response::Joined {
+						network_name: name,
+						hostname: assigned,
+					},
 					Err(e) => error(e),
 				}
 			}
 			Err(e) => error(e),
 		},
+	}
+}
+
+/// Validates the hostname before it reaches the roster, so an unusable label is
+/// refused at the point of setting rather than at resolution time.
+async fn create_network(
+	state: &State,
+	name: String,
+	hostname: Option<String>,
+) -> anyhow::Result<()> {
+	let hostname = match hostname {
+		Some(requested) => Some(
+			crate::names::validate(&requested, &state.own_id().to_string())
+				.map_err(|e| anyhow::anyhow!(e))?,
+		),
+		None => None,
+	};
+	state.create_network(name, hostname).await
+}
+
+/// Sets this node's hostname.
+///
+/// The coordinator is the source of truth for collisions, so a member asks it
+/// and adopts whatever comes back. If it cannot be reached the name is still
+/// recorded locally — the alternative is being unable to name a machine while
+/// the coordinator is down — and the next roster push reconciles it.
+async fn set_hostname(state: &State, requested: &str, force: bool) -> anyhow::Result<String> {
+	let own_id = state.own_id().to_string();
+	let wanted = crate::names::validate(requested, &own_id).map_err(|e| anyhow::anyhow!(e))?;
+
+	if state.is_coordinator().await {
+		return state
+			.claim_hostname(&own_id, &wanted, force)
+			.await?
+			.map_err(|e| anyhow::anyhow!(e));
+	}
+
+	let coordinator = state
+		.coordinator_id()
+		.await
+		.context("not a member of any network")?;
+	let coordinator: iroh::EndpointId = coordinator.parse().context("stored coordinator id")?;
+
+	match crate::connect::claim_hostname(state.endpoint(), coordinator, wanted.clone()).await {
+		Ok(assigned) => {
+			state.adopt_hostname(assigned.clone()).await?;
+			Ok(assigned)
+		}
+		Err(e) => {
+			eprintln!("claiming {wanted:?} with the coordinator failed: {e:#}");
+			state.adopt_hostname(wanted.clone()).await?;
+			Ok(wanted)
+		}
 	}
 }
 

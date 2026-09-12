@@ -8,10 +8,16 @@ use super::client::send;
 #[derive(Args)]
 pub struct CreateArgs {
 	pub name: String,
+	/// This machine's hostname on the new network
+	#[arg(long)]
+	pub hostname: Option<String>,
 }
 
 pub async fn run(args: CreateArgs) -> Result<()> {
-	match send(Request::CreateNetwork { name: args.name }).await? {
+	match send(Request::CreateNetwork {
+		name: args.name,
+		hostname: args.hostname,
+	}).await? {
 		Response::Ok { .. } => {
 			println!("network created, you are the coordinator");
 			Ok(())

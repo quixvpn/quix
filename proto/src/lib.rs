@@ -13,17 +13,23 @@ pub const VERSION_TAG: &str = env!("QUIX_VERSION_TAG");
 pub enum Request {
 	Ping { peer: String },
 	Status,
-	CreateNetwork { name: String },
+	CreateNetwork { name: String, hostname: Option<String> },
 	Invite,
-	Join { code: String },
+	Join { code: String, hostname: Option<String> },
 	Leave,
 	SetOperator { user: String },
+	SetHostname { hostname: String, force: bool },
 }
 
 /// One peer in the network, as seen from this node.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerStatus {
 	pub id: String,
+	/// Hostname if set, otherwise the peer's 8-character fallback identifier.
+	/// Always resolvable under `.quix`.
+	pub name: String,
+	/// Whether `name` is a real hostname rather than the fallback.
+	pub named: bool,
 	/// Primary overlay address.
 	pub v6: String,
 	/// Compatibility address, for applications that cannot speak IPv6.
@@ -54,18 +60,24 @@ pub enum Response {
 	Ok { echo: String },
 	Status {
 		endpoint_id: String,
+		/// This node's own hostname, or its fallback identifier.
+		name: String,
+		named: bool,
 		v6: String,
 		v4: String,
 		network: Option<String>,
 		coordinator: bool,
 		peers: Vec<PeerStatus>,
 		traffic: Traffic,
+		/// Hostnames a roster push tried to rebind and we refused.
+		conflicts: Vec<String>,
 	},
 	Pong { v6: String, v4: String, rtt_ms: Option<f64> },
 	Invite { code: String },
-	Joined { network_name: Option<String> },
+	Joined { network_name: Option<String>, hostname: Option<String> },
 	Left { network_name: Option<String>, coordinator_notified: bool },
 	OperatorSet { user: String, uid: u32 },
+	HostnameSet { hostname: String, requested: String },
 	Error { message: String },
 }
 

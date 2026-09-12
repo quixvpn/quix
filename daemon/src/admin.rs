@@ -3,6 +3,7 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use serde::{Deserialize, Serialize};
 
+use crate::membership::Member;
 use crate::state::State;
 
 pub const ADMIN_ALPN: &[u8] = b"quix-admin/0";
@@ -11,14 +12,26 @@ pub const ADMIN_ALPN: &[u8] = b"quix-admin/0";
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AdminRequest {
-	/// Joiner → coordinator: redeem an invite token.
-	Join { token_hex: String },
+	/// Joiner → coordinator: redeem an invite token, optionally asking for a
+	/// hostname. The name is a request, not an assertion — the coordinator
+	/// resolves collisions and answers with what was actually assigned.
+	Join {
+		token_hex: String,
+		#[serde(default)]
+		hostname: Option<String>,
+	},
 	/// Member → coordinator: remove me from the roster.
 	Leave,
+	/// Member → coordinator: claim this hostname for me.
+	///
+	/// Authenticated by the connection itself — iroh's handshake proves the
+	/// peer's key — so the coordinator knows which member is asking and will
+	/// only ever bind the name to that key.
+	SetHostname { hostname: String },
 	/// Coordinator → member: the roster has changed, here is the new one.
 	Roster {
 		network_name: Option<String>,
-		members: Vec<String>,
+		members: Vec<Member>,
 	},
 }
 
@@ -27,8 +40,14 @@ pub enum AdminRequest {
 pub enum AdminResponse {
 	Joined {
 		network_name: Option<String>,
-		members: Vec<String>,
+		members: Vec<Member>,
+		/// The hostname the coordinator actually assigned, which may carry a
+		/// numeric suffix if the requested one was taken.
+		#[serde(default)]
+		hostname: Option<String>,
 	},
+	/// The hostname a claim was granted, deduplicated if it had to be.
+	HostnameSet { hostname: String },
 	Ack,
 	Error {
 		message: String,
@@ -65,8 +84,12 @@ impl ProtocolHandler for AdminHandler {
 impl AdminHandler {
 	async fn dispatch(&self, req: AdminRequest, requester: String) -> AdminResponse {
 		match req {
-			AdminRequest::Join { token_hex } => self.join(token_hex, requester).await,
+			AdminRequest::Join {
+				token_hex,
+				hostname,
+			} => self.join(token_hex, hostname, requester).await,
 			AdminRequest::Leave => self.leave(requester).await,
+			AdminRequest::SetHostname { hostname } => self.set_hostname(hostname, requester).await,
 			AdminRequest::Roster {
 				network_name,
 				members,
@@ -74,14 +97,23 @@ impl AdminHandler {
 		}
 	}
 
-	async fn join(&self, token_hex: String, requester: String) -> AdminResponse {
+	async fn join(
+		&self,
+		token_hex: String,
+		hostname: Option<String>,
+		requester: String,
+	) -> AdminResponse {
 		let token = match decode_token(&token_hex) {
 			Ok(token) => token,
 			Err(e) => return AdminResponse::Error { message: e },
 		};
 
-		match self.state.redeem_invite(&token, requester.clone()).await {
-			Ok(Some(roster)) => {
+		match self
+			.state
+			.redeem_invite(&token, requester.clone(), hostname)
+			.await
+		{
+			Ok(Some((roster, hostname))) => {
 				println!("admitted new member: {requester}");
 				let network_name = self.state.network_name().await;
 
@@ -92,11 +124,41 @@ impl AdminHandler {
 				AdminResponse::Joined {
 					network_name,
 					members: roster,
+					hostname,
 				}
 			}
 			Ok(None) => AdminResponse::Error {
 				message: "invalid or already used invite".to_string(),
 			},
+			Err(e) => AdminResponse::Error {
+				message: e.to_string(),
+			},
+		}
+	}
+
+	/// A member claiming a hostname. The claim is bound to the connection's
+	/// authenticated key, so a member can only ever name itself.
+	async fn set_hostname(&self, hostname: String, requester: String) -> AdminResponse {
+		if !self.state.is_coordinator().await {
+			return AdminResponse::Error {
+				message: "only the coordinator assigns hostnames".to_string(),
+			};
+		}
+		if !self.state.is_member(&requester).await {
+			return AdminResponse::Error {
+				message: "not a member of this network".to_string(),
+			};
+		}
+
+		match self.state.claim_hostname(&requester, &hostname, false).await {
+			Ok(Ok(assigned)) => {
+				println!("{requester} is now {assigned}");
+				let network_name = self.state.network_name().await;
+				let roster = self.state.roster().await;
+				self.broadcast_roster(&requester, network_name, roster);
+				AdminResponse::HostnameSet { hostname: assigned }
+			}
+			Ok(Err(message)) => AdminResponse::Error { message },
 			Err(e) => AdminResponse::Error {
 				message: e.to_string(),
 			},
@@ -129,7 +191,7 @@ impl AdminHandler {
 	async fn roster(
 		&self,
 		network_name: Option<String>,
-		members: Vec<String>,
+		members: Vec<Member>,
 		requester: String,
 	) -> AdminResponse {
 		// Only the coordinator gets to rewrite our roster; otherwise any peer
@@ -150,12 +212,12 @@ impl AdminHandler {
 
 	/// Fire-and-forget roster push to every member except us and the joiner
 	/// (the joiner already got the roster in its join response).
-	fn broadcast_roster(&self, joiner: &str, network_name: Option<String>, roster: Vec<String>) {
+	fn broadcast_roster(&self, subject: &str, network_name: Option<String>, roster: Vec<Member>) {
 		let own_id = self.state.own_id().to_string();
 		let targets: Vec<String> = roster
 			.iter()
-			.filter(|id| **id != own_id && id.as_str() != joiner)
-			.cloned()
+			.map(|m| m.id.clone())
+			.filter(|id| *id != own_id && id != subject)
 			.collect();
 
 		for target in targets {

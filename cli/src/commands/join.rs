@@ -8,14 +8,26 @@ use super::client::send;
 #[derive(Args)]
 pub struct JoinArgs {
 	pub code: String,
+	/// This machine's hostname on the network being joined
+	#[arg(long)]
+	pub hostname: Option<String>,
 }
 
 pub async fn run(args: JoinArgs) -> Result<()> {
-	match send(Request::Join { code: args.code }).await? {
-		Response::Joined { network_name } => {
+	match send(Request::Join {
+		code: args.code,
+		hostname: args.hostname,
+	}).await? {
+		Response::Joined {
+			network_name,
+			hostname,
+		} => {
 			match network_name {
 				Some(name) => println!("joined network: {name}"),
 				None => println!("joined network"),
+			}
+			if let Some(hostname) = hostname {
+				println!("Hostname: {hostname} (reachable at {hostname}.quix)");
 			}
 			Ok(())
 		}
