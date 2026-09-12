@@ -17,6 +17,7 @@ pub enum Caller {
 	Uid(u32),
 	/// The client's user SID and whether its token is elevated, read by
 	/// impersonating the pipe client. Windows only.
+	#[cfg_attr(not(windows), allow(dead_code))]
 	Windows {
 		sid: String,
 		account: Option<String>,
