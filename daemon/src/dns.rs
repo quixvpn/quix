@@ -38,14 +38,29 @@ const DEFAULT_ADDR: &str = "127.0.0.1:5354";
 /// port, so Linux uses an unprivileged one and the daemon needs no capability
 /// to bind sockets at all.
 #[cfg(windows)]
-const ZONE_PORT: u16 = 53;
+pub const ZONE_PORT: u16 = 53;
 #[cfg(not(windows))]
-const ZONE_PORT: u16 = 5354;
+pub const ZONE_PORT: u16 = 5354;
 
 /// A freshly assigned IPv6 address is tentative until duplicate address
 /// detection finishes, and binding it before then fails. Worth a few retries.
 const BIND_ATTEMPTS: u32 = 10;
 const BIND_RETRY: Duration = Duration::from_millis(300);
+
+/// How long a candidate server has to answer its own probe. The listener is on
+/// this machine, so anything slower than this is not slowness but a drop.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// A just-routed address can lose the first datagram, which is not the same as
+/// being unreachable.
+const PROBE_ATTEMPTS: u32 = 3;
+
+/// The name a probe asks for. Nothing needs to be in the roster: what is being
+/// tested is whether the query arrives, and NXDOMAIN proves that just as well.
+const PROBE_NAME: &str = "probe";
+
+/// Lets a reply be paired with the probe that asked for it.
+const PROBE_ID: u16 = 0x9117;
 
 /// Names are only as stable as the roster, and a roster push can change them at
 /// any moment, so resolvers should not hold on to an answer for long.
@@ -65,7 +80,12 @@ pub fn listen_addr() -> Result<SocketAddr> {
 /// The loopback endpoint is required — without it there is no resolver at all.
 /// The mesh addresses are best-effort: losing them costs OS integration, not
 /// the ability to answer.
-pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Option<SocketAddr>)> {
+///
+/// Returns the sockets to serve on, and the mesh addresses that bound, in the
+/// order they should be offered to the OS resolver. Which of them is actually
+/// handed over is [`reachable_server`]'s decision, not this one's — binding an
+/// address says nothing about whether anything can send to it.
+pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Vec<SocketAddr>)> {
 	let testing = listen_addr()?;
 	let socket = UdpSocket::bind(testing)
 		.await
@@ -74,23 +94,107 @@ pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Option<SocketAddr>)>
 
 	let mut sockets = vec![socket];
 	let (v4, v6) = state.virtual_addrs();
-	let mut zone_server = None;
+	let mut candidates = Vec::new();
 
-	// IPv6 first: it is the primary family, so it is what the OS is pointed at
-	// when both are available.
+	// IPv6 first: it is the primary family, so it is preferred when both work.
 	for addr in [IpAddr::V6(v6), IpAddr::V4(v4)] {
 		let addr = SocketAddr::new(addr, ZONE_PORT);
 		match bind_with_retry(addr).await {
 			Ok(socket) => {
 				crate::info!("resolver listening on {addr} for *.{ZONE}");
 				sockets.push(socket);
-				zone_server.get_or_insert(addr);
+				candidates.push(addr);
 			}
 			Err(e) => crate::warn!("warning: resolver could not bind {addr}: {e:#}"),
 		}
 	}
 
-	Ok((sockets, zone_server))
+	Ok((sockets, candidates))
+}
+
+/// Picks the address to hand the OS resolver: the first candidate that answers.
+///
+/// Must be called once the sockets are being served, since it is those very
+/// sockets that answer the probe.
+pub async fn reachable_server(candidates: &[SocketAddr]) -> Option<SocketAddr> {
+	for &addr in candidates {
+		if probe(addr).await {
+			return Some(addr);
+		}
+		crate::warn!("warning: the {ZONE} resolver is bound to {addr} but nothing can reach it there");
+	}
+	None
+}
+
+/// Whether a query sent to `server` actually comes back answered by us.
+///
+/// A successful bind is not evidence of this, which is what made the Windows
+/// failure so quiet. An address can be assigned to an interface whose family is
+/// switched off moments later — another VPN's IPv6 leak protection unbinds IPv6
+/// on every adapter on the machine, ours included — leaving a bound socket on an
+/// address that no longer exists. The port can equally be filtered by that same
+/// VPN's DNS leak protection. Both look like a healthy listener from the inside,
+/// and both used to be registered with the OS regardless, so every lookup timed
+/// out while the daemon reported success.
+///
+/// Any reply of ours counts, NXDOMAIN included: the question is whether packets
+/// arrive, not what the roster holds.
+async fn probe(server: SocketAddr) -> bool {
+	let Some(query) = probe_query() else {
+		return false;
+	};
+
+	for _ in 0..PROBE_ATTEMPTS {
+		if probe_once(server, &query).await {
+			return true;
+		}
+	}
+	false
+}
+
+async fn probe_once(server: SocketAddr, query: &[u8]) -> bool {
+	// Same family as the target, or the send has nowhere to go from.
+	let local: SocketAddr = match server {
+		SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+		SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+	};
+
+	let Ok(socket) = UdpSocket::bind(local).await else {
+		return false;
+	};
+	if socket.send_to(query, server).await.is_err() {
+		return false;
+	}
+
+	let mut buf = [0u8; MAX_PACKET];
+	let Ok(Ok((len, _))) = tokio::time::timeout(PROBE_TIMEOUT, socket.recv_from(&mut buf)).await
+	else {
+		return false;
+	};
+
+	// The id pairs the reply with our query; the authority bit is what says the
+	// answer came from us rather than from some other resolver that happens to
+	// hold that address and port.
+	Packet::parse(&buf[..len])
+		.map(|reply| {
+			reply.id() == PROBE_ID
+				&& reply.has_flags(simple_dns::PacketFlag::AUTHORITATIVE_ANSWER)
+		})
+		.unwrap_or(false)
+}
+
+fn probe_query() -> Option<Vec<u8>> {
+	// Owned, or the name would borrow a temporary that dies before the packet
+	// is built.
+	let name = format!("{PROBE_NAME}.{ZONE}");
+	let mut packet = Packet::new_query(PROBE_ID);
+	packet.questions.push(simple_dns::Question::new(
+		simple_dns::Name::new(&name).ok()?.into_owned(),
+		QTYPE::TYPE(simple_dns::TYPE::AAAA),
+		simple_dns::QCLASS::CLASS(CLASS::IN),
+		false,
+	));
+	packet.build_bytes_vec().ok()
 }
 
 /// Retries past the window where a just-assigned address is not yet usable.
@@ -482,6 +586,98 @@ mod tests {
 			true => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
 			false => anyhow::bail!("no dig"),
 		}
+	}
+
+	/// Answers on an ephemeral loopback port exactly as the real listeners do,
+	/// so a probe can be pointed at something live.
+	async fn live_listener() -> SocketAddr {
+		let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let addr = socket.local_addr().unwrap();
+
+		tokio::spawn(async move {
+			let mut buf = vec![0u8; MAX_PACKET];
+			while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+				if let Some(reply) = answer(&buf[..len], &peers(), Some("homelab")) {
+					let _ = socket.send_to(&reply, from).await;
+				}
+			}
+		});
+		addr
+	}
+
+	/// An address with nothing behind it: bound long enough to get a port the
+	/// OS is not otherwise using, then released.
+	async fn dead_address() -> SocketAddr {
+		let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		socket.local_addr().unwrap()
+	}
+
+	#[tokio::test]
+	async fn a_listener_that_answers_is_reachable() {
+		assert!(probe(live_listener().await).await);
+	}
+
+	#[tokio::test]
+	async fn an_address_that_answers_nothing_is_not_reachable() {
+		assert!(!probe(dead_address().await).await);
+	}
+
+	#[tokio::test]
+	async fn a_bound_address_nothing_can_reach_is_never_registered() {
+		// The Windows failure this exists for. The socket bound, so the daemon
+		// took the address for usable and pointed NRPT at it, while every query
+		// sent there was dropped — by an interface whose IPv6 had been switched
+		// off underneath us, or by another VPN filtering port 53. Binding proves
+		// nothing; answering does.
+		assert_eq!(reachable_server(&[dead_address().await]).await, None);
+	}
+
+	#[tokio::test]
+	async fn an_unreachable_candidate_is_skipped_for_one_that_works() {
+		// IPv6 is offered first, so a dead IPv6 address used to be registered in
+		// preference to a working IPv4 one. It must now fall through instead.
+		let dead = dead_address().await;
+		let live = live_listener().await;
+
+		assert_eq!(reachable_server(&[dead, live]).await, Some(live));
+	}
+
+	#[tokio::test]
+	async fn the_preferred_candidate_wins_when_both_answer() {
+		let first = live_listener().await;
+		let second = live_listener().await;
+
+		assert_eq!(reachable_server(&[first, second]).await, Some(first));
+	}
+
+	#[test]
+	fn a_probe_reply_carries_back_everything_the_probe_matches_on() {
+		// `probe_once` accepts a reply only on its id and the authority bit, so
+		// both have to survive the round trip through our own answer path. An id
+		// that came back altered would make every probe fail, and nothing would
+		// ever be registered with the OS resolver again.
+		let query = probe_query().expect("a probe query");
+		let bytes = answer(&query, &peers(), Some("homelab")).expect("a reply");
+		let reply = Packet::parse(&bytes).expect("a well-formed reply");
+
+		assert_eq!(reply.id(), PROBE_ID, "the id must come back unaltered");
+		assert!(reply.has_flags(simple_dns::PacketFlag::AUTHORITATIVE_ANSWER));
+		// NXDOMAIN is the expected answer and still proves the path works.
+		assert_eq!(reply.rcode(), RCODE::NameError);
+	}
+
+	#[test]
+	fn a_probe_is_a_query_this_resolver_would_answer() {
+		// A probe asking something outside the zone would be met with NXDOMAIN
+		// by anyone, which would make the check prove nothing.
+		let bytes = probe_query().expect("a probe query");
+		let query = Packet::parse(&bytes).unwrap();
+
+		assert_eq!(query.id(), PROBE_ID);
+		assert_eq!(
+			host_in_zone(&query.questions[0].qname.to_string(), None),
+			Some(PROBE_NAME.to_string())
+		);
 	}
 
 	#[test]

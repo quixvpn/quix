@@ -236,6 +236,37 @@ Neither needs privileges beyond what the TUN device already requires. If
 registration fails — no systemd-resolved, for instance — the daemon logs a
 warning and carries on; only OS-wide resolution is lost.
 
+Before handing an address to the system resolver the daemon queries it, and
+registers only an address that answers. Binding one proves nothing on its own:
+it can belong to an interface whose IPv6 is switched off a moment later, or sit
+behind a filter that drops the port. Either way the socket looks healthy from
+the inside while every lookup times out, so the daemon used to report success
+and leave names quietly broken. IPv6 is still preferred; it just has to work.
+
+#### Another VPN's leak protection can break this
+
+On Windows especially, VPN clients ship leak-protection settings that reach
+across the whole machine, not just their own adapter:
+
+- **IPv6 leak protection** unbinds IPv6 (`ms_tcpip6`) from *every* adapter,
+  including `quix`. Our IPv6 mesh address then has no interface, no address and
+  no route, which is exactly the case above.
+- **DNS leak protection** filters UDP port 53 to everything but that VPN's own
+  resolver. NRPT rules carry no port field, so the Windows listener has no
+  choice but port 53, and there is nothing quix can do about this from inside.
+
+Proton VPN's IPv6 leak protection does the first of these and is a confirmed
+cause. To check:
+
+```powershell
+Get-NetAdapterBinding -ComponentID ms_tcpip6 -AllBindings | Format-Table Name, Enabled
+```
+
+If `quix` shows `False`, turn off the other VPN's IPv6 leak protection (or add
+an exception for the `quix` adapter) and restart the daemon. The daemon now says
+so in its log rather than claiming it registered successfully — see
+`C:\ProgramData\quix\quixd.log`.
+
 The resolver also stays reachable directly, which is the way to test it without
 involving the system resolver at all:
 

@@ -59,6 +59,14 @@ pub fn runtime() -> Result<tokio::runtime::Runtime> {
 		.build()?)
 }
 
+/// Where names still resolve when OS integration could not be set up. Always
+/// available, since it is the one endpoint the resolver refuses to start without.
+fn fallback_resolver() -> String {
+	dns::listen_addr()
+		.map(|addr| addr.to_string())
+		.unwrap_or_default()
+}
+
 /// Runs the daemon until `shutdown` resolves.
 pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	let secret_key = identity::load_or_create()?;
@@ -121,22 +129,50 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	let mut registered = false;
 
 	match dns::bind(&state).await {
-		Ok((sockets, zone_server)) => {
-			if let Some(server) = zone_server {
-				match resolv::register(&iface, server).await {
+		Ok((sockets, candidates)) => {
+			// Serving starts first: the reachability check is answered by these
+			// very sockets, so nothing can be verified until they are live.
+			tokio::spawn(dns::serve(state.clone(), sockets));
+
+			match dns::reachable_server(&candidates).await {
+				Some(server) => match resolv::register(&iface, server).await {
 					Ok(()) => {
-						crate::info!("registered *.{} with the system resolver", dns::ZONE);
+						crate::info!(
+							"registered *.{} with the system resolver via {server}",
+							dns::ZONE
+						);
 						registered = true;
 					}
 					Err(e) => crate::warn!(
 						"warning: could not register *.{} with the system resolver: {e:#}\n\
 						 names still resolve via {}",
 						dns::ZONE,
-						dns::listen_addr().map(|a| a.to_string()).unwrap_or_default()
+						fallback_resolver()
 					),
-				}
+				},
+				// Nothing bound at all — `bind` has already said why for each
+				// address, so repeating it here would only bury that.
+				None if candidates.is_empty() => crate::warn!(
+					"warning: no mesh address could be bound, so *.{} was not registered with \
+					 the system resolver\n\
+					 names still resolve via {}",
+					dns::ZONE,
+					fallback_resolver()
+				),
+				// Bound, but unreachable. Registering such an address is worse
+				// than registering nothing: every lookup times out instead of
+				// failing, and the daemon reports success while doing it.
+				None => crate::warn!(
+					"warning: nothing on this machine can reach the {} resolver, so it was not \
+					 registered with the system resolver\n\
+					 another VPN's IPv6 leak protection unbinds IPv6 from every adapter, and its \
+					 DNS leak protection filters port {}; either will do this\n\
+					 names still resolve via {}",
+					dns::ZONE,
+					dns::ZONE_PORT,
+					fallback_resolver()
+				),
 			}
-			tokio::spawn(dns::serve(state.clone(), sockets));
 		}
 		Err(e) => crate::warn!("warning: resolver did not start: {e:#}"),
 	}
