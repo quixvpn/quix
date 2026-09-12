@@ -9,6 +9,7 @@ mod membership;
 mod mesh;
 mod names;
 mod peers;
+mod resolv;
 mod routes;
 #[cfg(windows)]
 mod service;
@@ -105,15 +106,34 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 		)
 		.spawn();
 
-	// The resolver is not essential to the mesh: a failure to bind it should
-	// not stop the daemon carrying traffic.
-	{
-		let state = state.clone();
-		tokio::spawn(async move {
-			if let Err(e) = dns::serve(state).await {
-				eprintln!("resolver stopped: {e:#}");
+	// The resolver is not essential to the mesh: a failure here costs name
+	// resolution, not traffic, so it warns rather than stopping the daemon.
+	//
+	// Registration happens once at startup, not per network: the zone we claim
+	// is all of `.quix`, which does not change as networks are created, joined
+	// or left.
+	let iface = tun::interface_name();
+	let mut registered = false;
+
+	match dns::bind(&state).await {
+		Ok((sockets, zone_server)) => {
+			if let Some(server) = zone_server {
+				match resolv::register(&iface, server).await {
+					Ok(()) => {
+						println!("registered *.{} with the system resolver", dns::ZONE);
+						registered = true;
+					}
+					Err(e) => eprintln!(
+						"warning: could not register *.{} with the system resolver: {e:#}\n\
+						 names still resolve via {}",
+						dns::ZONE,
+						dns::listen_addr().map(|a| a.to_string()).unwrap_or_default()
+					),
+				}
 			}
-		});
+			tokio::spawn(dns::serve(state.clone(), sockets));
+		}
+		Err(e) => eprintln!("warning: resolver did not start: {e:#}"),
 	}
 
 	tokio::spawn(mesh::tun_to_mesh(state.clone()));
@@ -126,6 +146,15 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 			Ok(())
 		}
 	};
+
+	// Hand the zone back before going away. On Linux the per-link settings would
+	// vanish with the interface anyway; on Windows the NRPT rule is in the
+	// registry and would outlive us.
+	if registered {
+		if let Err(e) = resolv::deregister(&iface).await {
+			eprintln!("warning: could not release *.{}: {e:#}", dns::ZONE);
+		}
+	}
 
 	router.shutdown().await?;
 	result

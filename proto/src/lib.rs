@@ -56,6 +56,10 @@ pub struct Traffic {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+// Status carries far more than the other variants, but exactly one Response is
+// built and consumed per command, so boxing it would buy an allocation and an
+// indirection rather than save anything.
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
 	Ok { echo: String },
 	Status {
@@ -68,6 +72,8 @@ pub enum Response {
 		network: Option<String>,
 		coordinator: bool,
 		peers: Vec<PeerStatus>,
+		/// Suffix names resolve under, e.g. `homelab.quix`.
+		zone: String,
 		traffic: Traffic,
 		/// Hostnames a roster push tried to rebind and we refused.
 		conflicts: Vec<String>,

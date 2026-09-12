@@ -117,6 +117,11 @@ async fn dispatch(req: Request, state: &State) -> Response {
 		Request::Status => {
 			let hostnames = state.hostnames().await;
 			let own_hostname = state.hostname().await;
+			let zone = state
+				.network_name()
+				.await
+				.map(|n| format!("{}.{}", crate::names::network_label(&n), crate::dns::ZONE))
+				.unwrap_or_else(|| crate::dns::ZONE.to_string());
 			let peers = state
 				.peers()
 				.snapshot()
@@ -159,6 +164,7 @@ async fn dispatch(req: Request, state: &State) -> Response {
 				network: state.network_name().await,
 				coordinator: state.is_coordinator().await,
 				peers,
+				zone: zone.clone(),
 				conflicts: state.conflicts().await,
 			}
 		}
@@ -258,6 +264,7 @@ async fn create_network(
 	name: String,
 	hostname: Option<String>,
 ) -> anyhow::Result<()> {
+	let name = crate::names::validate_network(&name).map_err(|e| anyhow::anyhow!(e))?;
 	let hostname = match hostname {
 		Some(requested) => Some(
 			crate::names::validate(&requested, &state.own_id().to_string())

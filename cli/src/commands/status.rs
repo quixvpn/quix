@@ -23,6 +23,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 			network,
 			coordinator,
 			peers,
+			zone,
 			traffic,
 			conflicts,
 		} => {
@@ -32,7 +33,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 				None => println!("network  none — run `quix create <name>` or `quix join <code>`"),
 			}
 			let unnamed = if named { "" } else { "  (no hostname set)" };
-			println!("name ----  {name}.quix{unnamed}");
+			println!("name ----  {name}.{zone}{unnamed}");
 			println!("IPv4 ----  {v4}");
 			println!("IPv6 ----  {v6}");
 			println!("id ------  {endpoint_id}");
@@ -43,7 +44,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 				let linked = peers.iter().filter(|p| p.linked).count();
 				println!("\npeers  {linked}/{} linked", peers.len());
 				for peer in &peers {
-					print_peer(peer, args.verbose);
+					print_peer(peer, &zone, args.verbose);
 				}
 			}
 
@@ -67,13 +68,13 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 	}
 }
 
-fn print_peer(peer: &PeerStatus, verbose: bool) {
+fn print_peer(peer: &PeerStatus, zone: &str, verbose: bool) {
 	let mark = if peer.linked { '●' } else { '○' };
 	// Name and full id side by side: the name is what you type, the id is what
 	// actually identifies the peer and is worth being able to check.
 	let unnamed = if peer.named { "" } else { "  (no hostname set)" };
 
-	println!("  {mark} {}.quix{unnamed}", peer.name);
+	println!("  {mark} {}.{zone}{unnamed}", peer.name);
 	println!("    {:<16} {}", peer.v4, peer.id);
 	println!("    {}", peer.v6);
 

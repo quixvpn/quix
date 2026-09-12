@@ -110,12 +110,18 @@ anyone. Publishing a signed network record (pkarr, as iroh already uses for
 address discovery) would let admission survive the coordinator being away, and
 make the roster verifiable rather than merely received over a trusted link.
 
-### OS-level DNS registration
+### Resolver integration on macOS
 
-The resolver exists and answers `.quix` on a loopback port, but nothing tells
-the system about it, so ordinary programs cannot use those names. Needs
-systemd-resolved and `resolv.conf` handling on Linux, NRPT on Windows, and
-binding to a mesh address rather than loopback.
+Linux registers a systemd-resolved routing domain and Windows an NRPT rule.
+macOS needs its own mechanism — a resolver file under `/etc/resolver/quix`, or
+the equivalent via `scutil`.
+
+### Hosts without systemd-resolved
+
+Linux registration assumes systemd-resolved. On a host using plain
+`/etc/resolv.conf` or `resolvconf`, the daemon warns and `.quix` only resolves
+through its own port. Rayfish shares `resolv.conf` with other VPNs rather than
+fighting over it, which is the model to copy if this matters.
 
 ### Converging a refused name rebinding
 

@@ -32,7 +32,7 @@ pub async fn run(args: HostnameArgs) -> Result<()> {
 			if hostname != requested.to_lowercase() {
 				println!("({requested} was taken, so a suffix was added)");
 			}
-			println!("reachable at {hostname}.quix");
+			println!("run `quix status` to see the full name it resolves under");
 			Ok(())
 		}
 		Response::Error { message } => anyhow::bail!("hostname failed: {message}"),

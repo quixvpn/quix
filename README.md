@@ -213,16 +213,56 @@ not a replacement for it.
 
 ### Resolving names
 
-The daemon answers `.quix` queries on a loopback port of its own. Nothing is
-registered with the OS yet, so point a resolver at it directly:
+`.quix` names work with ordinary programs — `ping`, `ssh`, a browser — because
+the daemon registers the zone with the system resolver at startup:
 
 ```bash
-dig @127.0.0.1 -p 5354 nas.quix AAAA
-dig @127.0.0.1 -p 5354 dd0f06dd.quix A     # the fallback name works too
+ping nas.homelab.quix
+ssh user@nas.homelab.quix
 ```
 
-Override the address with `QUIX_DNS_ADDR`. Making `.quix` work for ordinary
-programs — systemd-resolved on Linux, NRPT on Windows — is separate work.
+On **Linux** that is a systemd-resolved routing domain (`~quix`) attached to the
+`quix` interface, so only `.quix` comes to us and every other name resolves
+exactly as before. Because the configuration is per-link, it disappears together
+with the interface — a killed daemon leaves nothing stale behind.
+
+On **Windows** it is an NRPT rule scoped to `.quix`. Those live in the registry
+and outlast the process, so the daemon removes any rule of its own at startup
+before adding a fresh one, and removes it again on shutdown.
+
+Neither needs privileges beyond what the TUN device already requires. If
+registration fails — no systemd-resolved, for instance — the daemon logs a
+warning and carries on; only OS-wide resolution is lost.
+
+The resolver also stays reachable directly, which is the way to test it without
+involving the system resolver at all:
+
+```bash
+dig @127.0.0.1 -p 5354 nas.homelab.quix AAAA   # host.network.quix
+dig @127.0.0.1 -p 5354 nas.quix AAAA           # flat form, same answer
+dig @127.0.0.1 -p 5354 dd0f06dd.quix A         # the fallback name works too
+```
+
+```powershell
+nslookup -port=5354 -type=AAAA nas.homelab.quix 127.0.0.1
+```
+
+Names resolve as `host.network.quix`, and the flat `host.quix` works too, so a
+name stays typable without remembering which network a peer is on. Because the
+network name becomes a DNS label, `quix create` now requires one — letters,
+digits and hyphens. Networks created before that rule are sanitised rather than
+refused.
+
+Override the testing address with `QUIX_DNS_ADDR`. The daemon additionally
+listens on port 53 of its own mesh addresses, which is what the OS is pointed
+at — NRPT rules carry no port, so 53 is not optional there.
+
+To see what Linux thinks:
+
+```bash
+resolvectl domain quix      # should list ~quix
+resolvectl query nas.homelab.quix
+```
 
 ### Controlling the daemon
 
@@ -330,9 +370,8 @@ Being explicit about what isn't built yet:
 - **The roster is unsigned.** Members trust the coordinator by identity alone,
   and it must be online to admit anyone. No DHT-published signed record yet, so
   admission doesn't survive the coordinator being away.
-- **`.quix` names are not wired into the OS resolver.** The daemon answers them
-  on its own loopback port; ordinary programs won't find them until
-  systemd-resolved and NRPT integration lands.
+- **macOS has no resolver integration.** Linux and Windows register the zone;
+  macOS would need its own mechanism.
 - **No `quix up` / `down`,** and no way to pause without stopping the daemon.
 - **Path MTU.** A link that settles below 1280 bytes drops large packets rather
   than fragmenting them.

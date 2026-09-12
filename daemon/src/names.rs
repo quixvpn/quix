@@ -71,6 +71,52 @@ pub fn validate(requested: &str, claimant_id: &str) -> Result<String, String> {
 	Ok(name)
 }
 
+/// Turns a network name into a DNS label, so it can sit in `.quix`.
+///
+/// Sanitises rather than refuses: networks created before names had to be
+/// labels still need to resolve, and rejecting them retroactively would leave
+/// those meshes with no zone at all.
+pub fn network_label(network: &str) -> String {
+	let label: String = network
+		.trim()
+		.to_ascii_lowercase()
+		.chars()
+		.map(|c| match c.is_ascii_alphanumeric() {
+			true => c,
+			false => '-',
+		})
+		.collect();
+
+	let label = label.trim_matches('-');
+	match label.is_empty() {
+		true => "network".to_string(),
+		false => label.chars().take(MAX_LEN).collect(),
+	}
+}
+
+/// Checks a network name at creation, where we can still say no.
+pub fn validate_network(name: &str) -> Result<String, String> {
+	let trimmed = name.trim();
+	if trimmed.is_empty() {
+		return Err("network name cannot be empty".to_string());
+	}
+	if trimmed.len() > MAX_LEN {
+		return Err(format!(
+			"network name is {} characters; it becomes a DNS label, so the limit is {MAX_LEN}",
+			trimmed.len()
+		));
+	}
+	// The name is shown as typed but resolves by its label, so refuse anything
+	// where the two would differ confusingly.
+	let label = network_label(trimmed);
+	if label != trimmed.to_ascii_lowercase() {
+		return Err(format!(
+			"network name may only contain letters, digits and hyphens (it becomes {label}.quix)"
+		));
+	}
+	Ok(trimmed.to_ascii_lowercase())
+}
+
 /// How far the numeric sequence runs before falling back to something unique
 /// by construction. Far past any plausible number of same-named peers.
 const MAX_SUFFIX: u32 = 9999;
@@ -154,6 +200,25 @@ mod tests {
 		assert!(validate("dd0f06dd", ID).is_ok());
 		// Eight characters that are not hex are an ordinary hostname.
 		assert!(validate("frontend", ID).is_ok());
+	}
+
+	#[test]
+	fn a_network_name_becomes_a_label() {
+		assert_eq!(network_label("homelab"), "homelab");
+		assert_eq!(network_label("minha-rede"), "minha-rede");
+		// Older networks were never checked, so they are sanitised, not refused.
+		assert_eq!(network_label("My Network"), "my-network");
+		assert_eq!(network_label("  rede!  "), "rede");
+		assert_eq!(network_label("***"), "network");
+	}
+
+	#[test]
+	fn new_network_names_must_already_be_labels() {
+		assert_eq!(validate_network("homelab"), Ok("homelab".to_string()));
+		assert_eq!(validate_network("Homelab"), Ok("homelab".to_string()));
+		assert!(validate_network("my network").is_err());
+		assert!(validate_network("").is_err());
+		assert!(validate_network(&"a".repeat(MAX_LEN + 1)).is_err());
 	}
 
 	#[test]
