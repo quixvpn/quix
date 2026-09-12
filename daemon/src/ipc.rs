@@ -88,11 +88,14 @@ async fn handle(conn: Stream, state: State) -> Result<()> {
 
 	// The kernel tells us who is connected; the client never gets to claim it.
 	let caller = Caller::of(&conn);
-	let resp = match authz::check(&req, &caller, state.operator_uid().await) {
+	let resp = match authz::check(&req, &caller, &state.operator().await) {
 		Ok(()) => dispatch(req, &state).await,
 		Err(message) => {
 			crate::warn!("refused {req:?} from {}", caller.describe());
-			Response::Error { message }
+			// Its own variant, not a generic error: the CLI retries elevated
+			// when it sees this, and matching on the text of a message would be
+			// a poor thing to hang that on.
+			Response::Unauthorized { message }
 		}
 	};
 
@@ -176,14 +179,20 @@ async fn dispatch(req: Request, state: &State) -> Response {
 			Err(e) => error(e),
 		},
 
-		Request::Invite => {
+		Request::Invite { ttl_secs } => {
 			if !state.is_coordinator().await {
 				return Response::Error {
 					message: "only the coordinator can invite".to_string(),
 				};
 			}
-			match state.generate_invite().await {
-				Ok(code) => Response::Invite { code },
+			// Clamped rather than trusted: the window is a security property, and
+			// the client does not get to widen it past what this daemon allows.
+			let ttl_secs = ttl_secs.clamp(1, proto::MAX_INVITE_TTL);
+			match state
+				.generate_invite(chrono::Duration::seconds(ttl_secs as i64))
+				.await
+			{
+				Ok((code, expires_at)) => Response::Invite { code, expires_at },
 				Err(e) => error(e),
 			}
 		}

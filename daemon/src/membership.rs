@@ -1,18 +1,45 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use iroh::EndpointId;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use crate::names;
+
+/// An outstanding invite, and the two things that decide whether it still counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInvite {
+	/// The network this was minted under. Tokens do not survive the node moving
+	/// to a different network, so a code shared for one network cannot admit
+	/// anyone to the next one.
+	pub network_id: Option<String>,
+	/// When it stops being redeemable.
+	pub expires_at: DateTime<Utc>,
+}
+
+impl PendingInvite {
+	fn is_live(&self, network_id: Option<&str>, now: DateTime<Utc>) -> bool {
+		// Both have to hold. An unbound invite matches no network, which is how
+		// tokens written before this existed are refused.
+		self.network_id.as_deref() == network_id
+			&& self.network_id.is_some()
+			&& self.expires_at > now
+	}
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Membership {
 	pub network_name: Option<String>,
 	pub coordinator_id: Option<String>,
+	/// Distinguishes one network from the next even when the same node
+	/// coordinates both under the same name. Local to this node: invites are
+	/// checked by whoever minted them, so it never goes on the wire.
+	#[serde(default)]
+	pub network_id: Option<String>,
 	pub members: Vec<Member>,
 	#[serde(default, with = "hex_tokens")]
-	pending_invites: HashSet<[u8; 16]>,
+	pending_invites: HashMap<[u8; 16], PendingInvite>,
 	/// Which key owns each hostname, including names whose owner has since
 	/// left. Entries are never rewritten to a different key, so a roster push
 	/// cannot silently redirect a name that is already in use — see
@@ -61,31 +88,75 @@ impl<'de> Deserialize<'de> for Member {
 /// otherwise write them as 16-element number arrays, which are unreadable and
 /// wouldn't match the hex the on-the-wire protocol already uses.
 mod hex_tokens {
+	use super::PendingInvite;
 	use serde::{Deserialize, Deserializer, Serialize, Serializer};
-	use std::collections::HashSet;
+	use std::collections::HashMap;
+
+	/// One stored invite. Written as a token beside what it is good for.
+	#[derive(Serialize, Deserialize)]
+	struct Entry {
+		token: String,
+		#[serde(flatten)]
+		invite: PendingInvite,
+	}
+
+	/// What a `pending_invites` array may hold. Files written before invites
+	/// expired carry bare hex strings.
+	#[derive(Deserialize)]
+	#[serde(untagged)]
+	enum Repr {
+		Full(Entry),
+		// The token is never read — these are dropped — but the field has to be
+		// here for the variant to match a bare JSON string at all.
+		Legacy(#[allow(dead_code)] String),
+	}
 
 	pub fn serialize<S: Serializer>(
-		tokens: &HashSet<[u8; 16]>,
+		invites: &HashMap<[u8; 16], PendingInvite>,
 		serializer: S,
 	) -> Result<S::Ok, S::Error> {
-		let mut encoded: Vec<String> = tokens.iter().map(hex::encode).collect();
-		encoded.sort(); // stable output, so saving twice gives the same file
-		encoded.serialize(serializer)
+		let mut entries: Vec<Entry> = invites
+			.iter()
+			.map(|(token, invite)| Entry {
+				token: hex::encode(token),
+				invite: invite.clone(),
+			})
+			.collect();
+		// Stable output, so saving twice gives the same file.
+		entries.sort_by(|a, b| a.token.cmp(&b.token));
+		entries.serialize(serializer)
 	}
 
 	pub fn deserialize<'de, D: Deserializer<'de>>(
 		deserializer: D,
-	) -> Result<HashSet<[u8; 16]>, D::Error> {
-		Vec::<String>::deserialize(deserializer)?
-			.into_iter()
-			.map(|token| {
-				let bytes = hex::decode(&token).map_err(serde::de::Error::custom)?;
-				bytes
-					.try_into()
-					.map_err(|_| serde::de::Error::custom("invite token must be 16 bytes"))
-			})
-			.collect()
+	) -> Result<HashMap<[u8; 16], PendingInvite>, D::Error> {
+		let mut out = HashMap::new();
+
+		for entry in Vec::<Repr>::deserialize(deserializer)? {
+			// A token from before invites were bound and dated carries neither,
+			// so there is no window and no network it could be honoured for.
+			// Dropping it is the whole point: those are the tokens that used to
+			// outlive their network.
+			let Repr::Full(entry) = entry else { continue };
+
+			let bytes = hex::decode(&entry.token).map_err(serde::de::Error::custom)?;
+			let token: [u8; 16] = bytes
+				.try_into()
+				.map_err(|_| serde::de::Error::custom("invite token must be 16 bytes"))?;
+			out.insert(token, entry.invite);
+		}
+
+		Ok(out)
 	}
+}
+
+/// Names one network apart from another. Random rather than derived: two
+/// networks created by the same node under the same name must not collide, and
+/// that is exactly the case that let a stale invite cross over.
+fn new_network_id() -> String {
+	let mut bytes = [0u8; 16];
+	getrandom::fill(&mut bytes).expect("failed to get random bytes");
+	hex::encode(bytes)
 }
 
 fn path() -> Result<PathBuf> {
@@ -119,6 +190,10 @@ impl Membership {
 	pub fn create(&mut self, name: String, own_id: String, hostname: Option<String>) {
 		self.network_name = Some(name);
 		self.coordinator_id = Some(own_id.clone());
+		// A new network is a different network, whatever it is called, so
+		// invites minted under the last one stop counting here.
+		self.network_id = Some(new_network_id());
+		self.pending_invites.clear();
 		self.members = vec![Member::new(own_id.clone())];
 		if let Some(hostname) = hostname {
 			// Validated by the caller; we are the coordinator and alone, so
@@ -128,16 +203,44 @@ impl Membership {
 	}
 
 	/// Mints a one-time invite, returning the full shareable code (id + token,
-	/// Base58-encoded as one blob — shorter than hex, and nothing to split).
-	pub fn generate_invite(&mut self, own_id: EndpointId) -> String {
+	/// Base58-encoded as one blob — shorter than hex, and nothing to split)
+	/// alongside the moment it stops being redeemable.
+	///
+	/// The window and the network are recorded here, not in the code: the
+	/// coordinator is the only party that checks them, so putting them on the
+	/// wire would only invite a joiner to argue about them.
+	pub fn generate_invite(
+		&mut self,
+		own_id: EndpointId,
+		ttl: Duration,
+		now: DateTime<Utc>,
+	) -> (String, DateTime<Utc>) {
+		// Cheapest possible moment to take out the rubbish.
+		self.prune_expired(now);
+
 		let mut token = [0u8; 16];
 		getrandom::fill(&mut token).expect("failed to get random bytes");
-		self.pending_invites.insert(token);
+
+		let expires_at = now + ttl;
+		self.pending_invites.insert(
+			token,
+			PendingInvite {
+				network_id: self.network_id.clone(),
+				expires_at,
+			},
+		);
 
 		let mut blob = Vec::with_capacity(48);
 		blob.extend_from_slice(own_id.as_bytes());
 		blob.extend_from_slice(&token);
-		bs58::encode(blob).into_string()
+		(bs58::encode(blob).into_string(), expires_at)
+	}
+
+	/// Forgets invites whose window has closed. They can never be redeemed
+	/// again, so keeping them only grows the file.
+	fn prune_expired(&mut self, now: DateTime<Utc>) {
+		self.pending_invites
+			.retain(|_, invite| invite.expires_at > now);
 	}
 
 	/// Decodes an invite code into (coordinator_id, token).
@@ -232,10 +335,31 @@ impl Membership {
 		Ok(assigned)
 	}
 
-	pub fn redeem_invite(&mut self, token: &[u8; 16], requester_id: String) -> bool {
-		if !self.pending_invites.remove(token) {
+	/// Burns an invite and admits the bearer, if it is still good for anything.
+	///
+	/// Being unknown, already spent, past its window, or minted for a different
+	/// network are all the same answer — a joiner learns only that the code did
+	/// not work, never which of those it was.
+	pub fn redeem_invite(
+		&mut self,
+		token: &[u8; 16],
+		requester_id: String,
+		now: DateTime<Utc>,
+	) -> bool {
+		let network_id = self.network_id.clone();
+
+		// Removed before it is judged: a token presented once is spent whatever
+		// the verdict, so a rejected code cannot be retried against a network
+		// this node moves to later.
+		let Some(invite) = self.pending_invites.remove(token) else {
+			return false;
+		};
+		self.prune_expired(now);
+
+		if !invite.is_live(network_id.as_deref(), now) {
 			return false;
 		}
+
 		if !self.is_member(&requester_id) {
 			self.members.push(Member::new(requester_id));
 		}
@@ -258,6 +382,10 @@ impl Membership {
 		// A fresh network means no prior bindings to honour; everything in this
 		// first roster is what we pin from here on.
 		self.bindings.clear();
+		// Someone else coordinates here, so we mint nothing and anything we
+		// minted before belonged to a network we have now left.
+		self.network_id = None;
+		self.pending_invites.clear();
 		self.apply_roster(&own_id, roster);
 	}
 
@@ -326,6 +454,7 @@ impl Membership {
 	pub fn leave(&mut self) {
 		self.network_name = None;
 		self.coordinator_id = None;
+		self.network_id = None;
 		self.members.clear();
 		self.pending_invites.clear();
 		self.bindings.clear();
@@ -355,30 +484,189 @@ mod tests {
 		iroh::SecretKey::from_bytes(&[n; 32]).public().to_string()
 	}
 
+	fn coordinator() -> EndpointId {
+		iroh::SecretKey::from_bytes(&[1u8; 32]).public()
+	}
+
+	/// The instant these tests pretend an invite was minted at.
+	///
+	/// Arbitrary and fixed. Expiry is the thing under test, so the clock has to
+	/// be an input rather than the wall clock — otherwise "still valid after 29
+	/// minutes" depends on how long the test took to run. This is why
+	/// `generate_invite` and `redeem_invite` take the time instead of reading it.
+	fn minted_at() -> DateTime<Utc> {
+		"2000-01-01T00:00:00Z".parse().unwrap()
+	}
+
+	/// A network with one outstanding invite, which is the state every one of
+	/// these tests starts from.
+	fn with_invite(name: &str, ttl: Duration) -> (Membership, [u8; 16]) {
+		let mut m = Membership::default();
+		m.create(name.into(), id(1), None);
+		let (code, _) = m.generate_invite(coordinator(), ttl, minted_at());
+		let (_, token) = Membership::decode_invite(&code).unwrap();
+		(m, token)
+	}
+
 	#[test]
 	fn invite_code_round_trips() {
-		let coordinator = iroh::SecretKey::from_bytes(&[1u8; 32]).public();
 		let mut m = Membership::default();
+		m.create("net".into(), id(1), None);
 
-		let code = m.generate_invite(coordinator);
+		let (code, expires_at) = m.generate_invite(coordinator(), Duration::minutes(5), minted_at());
 		let (decoded_id, token) = Membership::decode_invite(&code).unwrap();
 
-		assert_eq!(decoded_id, coordinator);
-		assert!(m.redeem_invite(&token, id(2)), "minted token must redeem");
+		assert_eq!(decoded_id, coordinator());
+		assert_eq!(expires_at, minted_at() + Duration::minutes(5));
+		assert!(m.redeem_invite(&token, id(2), minted_at()), "minted token must redeem");
 		assert!(m.is_member(&id(2)));
 	}
 
 	#[test]
 	fn an_invite_only_redeems_once() {
-		let coordinator = iroh::SecretKey::from_bytes(&[1u8; 32]).public();
-		let mut m = Membership::default();
+		let (mut m, token) = with_invite("net", Duration::minutes(5));
 
-		let code = m.generate_invite(coordinator);
-		let (_, token) = Membership::decode_invite(&code).unwrap();
-
-		assert!(m.redeem_invite(&token, id(2)));
-		assert!(!m.redeem_invite(&token, id(3)), "token must be burned");
+		assert!(m.redeem_invite(&token, id(2), minted_at()));
+		assert!(!m.redeem_invite(&token, id(3), minted_at()), "token must be burned");
 		assert!(!m.is_member(&id(3)));
+	}
+
+	#[test]
+	fn a_single_use_invite_is_spent_even_with_time_left() {
+		// The window is a ceiling, not an allowance: redeeming consumes it.
+		let (mut m, token) = with_invite("net", Duration::days(2));
+
+		assert!(m.redeem_invite(&token, id(2), minted_at()));
+		let later = minted_at() + Duration::hours(1);
+		assert!(!m.redeem_invite(&token, id(3), later), "still single use");
+	}
+
+	#[test]
+	fn an_invite_expires_once_its_window_passes() {
+		let (mut m, token) = with_invite("net", Duration::minutes(30));
+
+		let too_late = minted_at() + Duration::minutes(31);
+		assert!(!m.redeem_invite(&token, id(2), too_late), "the window closed");
+		assert!(!m.is_member(&id(2)), "and nobody was admitted");
+	}
+
+	#[test]
+	fn an_invite_holds_right_up_to_its_deadline() {
+		let (mut m, token) = with_invite("net", Duration::minutes(30));
+
+		// A second before, it still works; the boundary itself is closed, so a
+		// stored deadline is never ambiguous.
+		assert!(m.redeem_invite(&token, id(2), minted_at() + Duration::minutes(30) - Duration::seconds(1)));
+
+		let (mut m, token) = with_invite("net", Duration::minutes(30));
+		assert!(!m.redeem_invite(&token, id(2), minted_at() + Duration::minutes(30)));
+	}
+
+	#[test]
+	fn a_failed_redemption_still_spends_the_token() {
+		// Otherwise a code refused for one reason could be kept and retried
+		// against a network this node moves to later.
+		let (mut m, token) = with_invite("net", Duration::minutes(30));
+
+		assert!(!m.redeem_invite(&token, id(2), minted_at() + Duration::hours(1)), "expired");
+		assert!(!m.redeem_invite(&token, id(2), minted_at()), "and gone even if time rewinds");
+	}
+
+	#[test]
+	fn an_invite_does_not_survive_creating_another_network() {
+		// Vuln 3. A code minted for one network used to admit its bearer to
+		// whatever network the node held next.
+		let (mut m, token) = with_invite("net-a", Duration::days(2));
+
+		m.create("net-b".into(), id(1), None);
+
+		assert!(!m.redeem_invite(&token, id(9), minted_at()), "net-a's code is not net-b's");
+		assert!(!m.is_member(&id(9)));
+	}
+
+	#[test]
+	fn an_invite_does_not_survive_joining_someone_elses_network() {
+		let (mut m, token) = with_invite("net-a", Duration::days(2));
+
+		m.set_joined(id(5), id(1), Some("theirs".into()), vec![member(5)]);
+
+		assert!(!m.redeem_invite(&token, id(9), minted_at()), "we admit nobody here");
+		assert!(!m.is_member(&id(9)));
+	}
+
+	#[test]
+	fn two_networks_of_the_same_name_are_still_different_networks() {
+		// The binding cannot lean on the network's name: the same node creating
+		// `net` twice is exactly the case a name cannot tell apart.
+		let (mut m, token) = with_invite("net", Duration::days(2));
+		let first = m.network_id.clone();
+
+		m.create("net".into(), id(1), None);
+
+		assert_ne!(m.network_id, first, "a new network gets a new identity");
+		assert!(!m.redeem_invite(&token, id(9), minted_at()));
+	}
+
+	#[test]
+	fn leaving_invalidates_outstanding_invites() {
+		let (mut m, token) = with_invite("net", Duration::days(2));
+
+		m.leave();
+
+		assert!(!m.redeem_invite(&token, id(9), minted_at()));
+	}
+
+	#[test]
+	fn expired_invites_are_forgotten_rather_than_kept_forever() {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), None);
+		for _ in 0..3 {
+			m.generate_invite(coordinator(), Duration::minutes(5), minted_at());
+		}
+		assert_eq!(m.pending_invites.len(), 3);
+
+		// Minting after they lapse clears them out.
+		m.generate_invite(coordinator(), Duration::minutes(5), minted_at() + Duration::hours(1));
+		assert_eq!(m.pending_invites.len(), 1, "only the live one remains");
+	}
+
+	#[test]
+	fn a_token_from_before_invites_expired_is_refused() {
+		// v0.1.x wrote bare hex strings with no window and no network. There is
+		// no window to honour and no network to honour it for, and these are
+		// precisely the tokens that used to outlive their network.
+		//
+		// Built from `id()` rather than pasted, so the key is self-evidently a
+		// test one and no real node's identity ends up in the repository.
+		const LEGACY_TOKEN: &str = "000102030405060708090a0b0c0d0e0f";
+		let stored = format!(
+			r#"{{
+				"network_name": "net",
+				"coordinator_id": "{coordinator}",
+				"members": ["{coordinator}"],
+				"pending_invites": ["{LEGACY_TOKEN}"]
+			}}"#,
+			coordinator = id(1),
+		);
+
+		let mut m: Membership = serde_json::from_str(&stored).expect("an existing file must load");
+
+		assert!(m.pending_invites.is_empty(), "dropped on load");
+		let token = hex::decode("bfc15e2af04b02803f18d1f735eaedad").unwrap();
+		assert!(!m.redeem_invite(&token.try_into().unwrap(), id(9), minted_at()));
+	}
+
+	#[test]
+	fn an_invite_survives_being_written_and_read_back() {
+		let (m, token) = with_invite("net", Duration::days(2));
+
+		let written = serde_json::to_string(&m).unwrap();
+		let mut reloaded: Membership = serde_json::from_str(&written).unwrap();
+
+		assert!(
+			reloaded.redeem_invite(&token, id(2), minted_at()),
+			"a restart must not invalidate a live invite:\n{written}"
+		);
 	}
 
 	#[test]
@@ -528,8 +816,9 @@ mod tests {
 	fn a_roster_written_before_hostnames_still_loads() {
 		// Exactly the shape v0.1.x wrote: members as bare id strings, and no
 		// bindings key at all.
+		// these member keys are not valid reachable peers, they are just testing keys
 		let stored = r#"{
-			"network_name": "minha-rede",
+			"network_name": "network",
 			"coordinator_id": "5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",
 			"members": [
 				"5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",

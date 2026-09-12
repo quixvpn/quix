@@ -16,3 +16,17 @@ tokio = { workspace = true, features = ["full"] }
 interprocess = { version = "2.4.4", features = ["tokio"] }
 sha2 = "0.11.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset"] }
+
+[target."cfg(windows)".dependencies]
+# Self-elevation: reading our own token, raising the UAC prompt via
+# ShellExecuteExW, and pointing the elevated child's output at a file.
+windows-sys = { version = "0.61", features = [
+	"Win32_Foundation",
+	"Win32_Security",
+	"Win32_System_Console",
+	# SHELLEXECUTEINFOW carries an HKEY, so it is gated behind this.
+	"Win32_System_Registry",
+	"Win32_System_Threading",
+	"Win32_UI_Shell",
+	"Win32_UI_WindowsAndMessaging",
+] }

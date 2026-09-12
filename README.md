@@ -102,8 +102,6 @@ socket at `/run/quix/quixd.sock`.
 
 ### Windows
 
-From an **elevated** PowerShell:
-
 ```powershell
 irm https://raw.githubusercontent.com/quixvpn/quix/master/scripts/install.ps1 | iex
 ```
@@ -119,6 +117,11 @@ Or from a clone, which is the only way to pass flags:
 Installs to `Program Files\quix`, adds it to the machine PATH, and registers
 `quixd` as a LocalSystem service with automatic restart. State lives in
 `C:\ProgramData\quix`. Open a new terminal afterwards to pick up the PATH.
+
+Installing a service and editing the machine PATH both need Administrator, so
+the script re-runs itself elevated and you get a UAC prompt. Its output is
+transcribed back to the terminal you started from. Run it already elevated and
+it just proceeds.
 
 Windows is **experimental** — see [Known gaps](#known-gaps).
 
@@ -146,13 +149,14 @@ QUIX_SOCKET=/tmp/quix.sock ./target/debug/quix status
 |---|---|
 | `quix create <name>` | Start a network and become its coordinator |
 | `quix invite` | Mint a one-time invite code (coordinator only) |
+| `quix invite --expires 30 min` | …valid for a window you choose, instead of the default 5 minutes |
 | `quix join <code>` | Join a network with an invite code |
 | `quix leave` | Leave the current network and drop every link |
 | `quix hostname <name>` | Set this machine's name on the mesh |
 | `quix status` | This node, its addresses, and every peer's link state |
 | `quix status -v` | Adds per-hop packet counters and full endpoint ids |
 | `quix ping <peer-id>` | Probe a peer's link and report RTT |
-| `quix set-operator <user>` | Let a local user run commands without sudo |
+| `quix set-operator <user>` | Let a local user run commands without sudo (Unix only) |
 | `quix service status` | Whether the daemon runs now, and whether it starts at boot |
 | `quix service start` \| `stop` \| `restart` | Control the daemon now |
 | `quix service enable` \| `disable` | Control whether it starts at boot |
@@ -167,6 +171,8 @@ network created, you are the coordinator
 
 $ quix invite
 invite code: 7hmYoctBr87SmrNCLPtk6op4V36pf18JCkEDWsva6K3PVPHtQf2UWb51hcQrL17WRw
+expires:     in 5 minutes (2026-09-12T18:35:02+00:00)
+single use — redeeming it consumes it, whatever time is left
 
 $ quix status
 network  homelab  (coordinator)
@@ -180,6 +186,34 @@ peers  1/1 linked
 
 `●` means the data-plane link is up, `○` means the peer is known but not
 currently reachable.
+
+### Invites
+
+An invite is a bearer token: whoever holds the code can join, so it is scoped as
+tightly as it can be while still being useful.
+
+```bash
+quix invite                     # valid for 5 minutes
+quix invite --expires 30 min    # min, hours or days
+quix invite --expires 2 days
+```
+
+Three limits, all enforced by the coordinator that minted the code:
+
+- **Single use.** Redeeming it consumes it, whatever time is left on the window.
+  A code presented once is spent even if it was refused, so a rejected code
+  cannot be kept and retried later.
+- **Time limited.** Five minutes by default, 30 days at most. Past the window it
+  fails exactly as an already-used code does — a joiner is never told which of
+  the two it was.
+- **Bound to one network.** A code is only good for the network it was minted
+  under. Creating another network, joining someone else's, or leaving all
+  invalidate outstanding invites, and the network is identified by a random id
+  rather than its name, so creating `homelab` twice does not make the first
+  network's codes work on the second.
+
+Codes minted by versions before this was enforced carry no window and no
+network, so they are dropped when `network.json` is read.
 
 ### Names
 
@@ -354,22 +388,75 @@ dropped   not a member 104  too big 21
 ## Permissions
 
 The daemon authorizes each command by the **caller's identity**, read from the
-socket itself, rather than by the socket's file permissions:
+connection itself, rather than by the socket's file permissions:
 
 - **Read-only** commands (`status`, `ping`) are open to any local user.
-- **Mutating** commands (`create`, `invite`, `join`, `leave`, `set-operator`)
-  need root or the configured operator.
+- **Mutating** commands (`create`, `invite`, `join`, `leave`, `hostname`,
+  `set-operator`) need root, or the configured operator, or — on Windows — an
+  elevated caller.
 
-The user who runs the installer becomes the operator automatically. Authorize
-someone else with:
+The identity is the kernel's answer about the live connection, not anything the
+client sends, so it cannot be forged. On Unix that is `SO_PEERCRED`. On Windows
+the daemon impersonates the pipe client and reads the token behind it: the pipe
+can also name the client's PID, but looking a token up by PID is racy — the
+process can exit and its PID be reused before the check — so the connection is
+asked instead. A client that connects anonymously has no token to read, and
+counts as unidentified, which is refused.
+
+The user who runs the installer becomes the operator automatically, on both
+platforms. On Unix that is `$SUDO_USER`'s uid; on Windows it is the installing
+account's SID, and the installer refuses anything that is not a real user
+account — a group or a well-known SID like `Everyone` is far too broad to hand
+this to.
+
+Authorize someone else with:
 
 ```bash
 sudo quix set-operator alice
 ```
 
+`set-operator` is Unix-only for now: it takes a username, and the Windows
+operator is a SID. Reinstalling is how you change it there. A SID rather than a
+uid because Windows has nothing like a uid — and it is the sounder identity
+anyway, since a deleted-and-recreated account gets a fresh SID, where a uid can
+be recycled and silently hand authority to a different person.
+
 This is the model Tailscale uses. A Unix group (the `docker` approach) can't
 distinguish reading status from changing what the machine belongs to, needs a
 fresh login session to take effect, and has no Windows equivalent.
+
+### Elevation on Windows
+
+There is no `sudo`: a process cannot gain privileges, only start one that has
+them. So rather than failing with "run this from an elevated terminal", the CLI
+re-runs itself through `ShellExecuteExW` with the `runas` verb — the same
+mechanism as the shell's own *Run as administrator* — and you get a UAC prompt.
+
+Only commands that genuinely need it ask. Everything else runs with no prompt,
+because a dialog in front of `quix status` teaches people to click through them:
+
+| Prompts | Why |
+|---|---|
+| `service start` \| `stop` \| `restart` \| `enable` \| `disable` | Service Control Manager writes |
+| `update` | Stops the service and replaces binaries in `Program Files` |
+
+`status`, `ping`, `version`, `service status` and `update --check` never prompt.
+
+The membership commands — `create`, `invite`, `join`, `leave`, `hostname` — are
+the daemon's decision rather than the OS's, so they are **tried first and only
+prompt if the daemon actually refuses**. Since the installing account is already
+the operator, day to day they never prompt at all; another account on the same
+machine gets a prompt exactly when it would change the outcome. Asking up front
+would put a dialog in front of the one person who does not need one.
+
+Nothing has happened when that refusal arrives — authorization is checked before
+the daemon acts — so the elevated retry repeats no work.
+
+The elevated copy cannot write to your console — Windows does not let a
+higher-integrity process attach to a lower-integrity one — so it runs hidden
+with its output pointed at a file, which the original process prints when it
+exits, along with its exit code. From the terminal the command simply runs,
+after a prompt. Declining the prompt reports that and exits non-zero.
 
 ---
 
@@ -395,9 +482,20 @@ since both addresses are local to that host.
 
 Being explicit about what isn't built yet:
 
-- **Windows has no caller authorization.** The named pipe gives us the client's
-  PID, but turning that into a user SID needs token FFI that isn't written.
-  Until then any local user on Windows can run any command.
+- **Peers are not checked against the addresses they send from.** An inbound
+  packet is written to the TUN whatever source address it claims, so any member
+  can pose as any other at the IP layer. WireGuard's `AllowedIPs` is the check
+  this is missing; the routing table needed to do it already exists.
+- **The control socket is open to every local user.** Both platforms — `0666` on
+  the Unix socket, a null DACL on the Windows pipe — and authorization is what
+  actually guards it, not the permissions. That is deliberate, so that reading
+  state needs no privilege, but it does mean a bug in `authz` is the only thing
+  between a local process and a mutating command. Tightening both to a dedicated
+  group and to `Users`-read / `Administrators`-write is still to do.
+- **The Windows operator can only be set by installing.** The installer records
+  the installing account's SID, which covers the common case, but `set-operator`
+  takes a username and has no SID equivalent yet — so changing it afterwards, or
+  granting a second account, means reinstalling.
 - **One network per node.** `Membership` holds a single network; there's no
   `quix leave <name>` because there's nothing to disambiguate.
 - **The roster is unsigned.** Members trust the coordinator by identity alone,

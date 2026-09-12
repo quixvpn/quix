@@ -105,11 +105,12 @@ impl State {
 		Ok(())
 	}
 
-	pub async fn generate_invite(&self) -> Result<String> {
+	/// Mints an invite valid for `ttl`, returning the code and when it dies.
+	pub async fn generate_invite(&self, ttl: chrono::Duration) -> Result<(String, String)> {
 		let mut m = self.membership.lock().await;
-		let code = m.generate_invite(self.own_id());
+		let (code, expires_at) = m.generate_invite(self.own_id(), ttl, chrono::Utc::now());
 		m.save()?;
-		Ok(code)
+		Ok((code, expires_at.to_rfc3339()))
 	}
 
 	/// Coordinator side of a join: admits the requester and returns the roster
@@ -124,7 +125,7 @@ impl State {
 		hostname: Option<String>,
 	) -> Result<Option<(Vec<Member>, Option<String>)>> {
 		let mut m = self.membership.lock().await;
-		if !m.redeem_invite(token, requester_id.clone()) {
+		if !m.redeem_invite(token, requester_id.clone(), chrono::Utc::now()) {
 			return Ok(None);
 		}
 
@@ -244,8 +245,13 @@ impl State {
 		Ok(true)
 	}
 
-	pub async fn operator_uid(&self) -> Option<u32> {
-		self.settings.lock().await.operator_uid
+	/// Who may mutate without being root or elevated, on either platform.
+	pub async fn operator(&self) -> crate::authz::Operator {
+		let settings = self.settings.lock().await;
+		crate::authz::Operator {
+			uid: settings.operator_uid,
+			sid: settings.operator_sid.clone(),
+		}
 	}
 
 	pub async fn set_operator(&self, name: String, uid: u32) -> Result<()> {

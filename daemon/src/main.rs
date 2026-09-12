@@ -18,6 +18,10 @@ mod settings;
 mod state;
 mod stats;
 mod tun;
+#[cfg(windows)]
+mod winacl;
+#[cfg(windows)]
+mod winauth;
 
 use std::future::Future;
 

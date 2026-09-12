@@ -2780,6 +2780,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2804,6 +2805,7 @@ dependencies = [
  "tun-rs",
  "uzers",
  "windows-service",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

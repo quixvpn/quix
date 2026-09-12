@@ -27,5 +27,26 @@ pub async fn send(req: Request) -> Result<Response> {
 	let mut line = String::new();
 	recver.read_line(&mut line).await?;
 
-	Ok(serde_json::from_str(line.trim())?)
+	let response: Response = serde_json::from_str(line.trim())?;
+
+	// Ask first, prompt only if the answer was no.
+	//
+	// The operator — whoever installed quix — is authorized already, so the
+	// common case never sees a UAC dialog. Anyone else gets one exactly when it
+	// would change the outcome, rather than on every mutating command. Nothing
+	// has happened at this point: authorization is checked before the daemon
+	// acts, so re-running the command elevated repeats no work.
+	#[cfg(windows)]
+	if matches!(response, Response::Unauthorized { .. }) && !crate::elevate::is_elevated() {
+		crate::elevate::relaunch();
+	}
+
+	// Raised here rather than left to each command, which would otherwise meet
+	// it in a catch-all arm and report "unexpected response" over a message
+	// that already says who was refused and how to fix it.
+	if let Response::Unauthorized { message } = response {
+		anyhow::bail!("{message}");
+	}
+
+	Ok(response)
 }

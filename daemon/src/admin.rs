@@ -103,6 +103,16 @@ impl AdminHandler {
 		hostname: Option<String>,
 		requester: String,
 	) -> AdminResponse {
+		// Defence in depth. Only a coordinator has invites to redeem, so this
+		// should be unreachable — but it is the check that was missing when a
+		// token minted under one network could still be spent after the node
+		// had moved to another.
+		if !self.state.is_coordinator().await {
+			return AdminResponse::Error {
+				message: "this node does not admit members to a network".to_string(),
+			};
+		}
+
 		let token = match decode_token(&token_hex) {
 			Ok(token) => token,
 			Err(e) => return AdminResponse::Error { message: e },
@@ -127,8 +137,11 @@ impl AdminHandler {
 					hostname,
 				}
 			}
+			// One answer for every way a code can fail — unknown, spent, past
+			// its window, or minted for another network. Which of those it was
+			// is not a joiner's business.
 			Ok(None) => AdminResponse::Error {
-				message: "invalid or already used invite".to_string(),
+				message: "invalid, expired, or already used invite".to_string(),
 			},
 			Err(e) => AdminResponse::Error {
 				message: e.to_string(),
