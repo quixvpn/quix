@@ -40,7 +40,15 @@ places (the unit and the Windows service's registry `Environment` key). A single
 `QUIX_STATE_DIR` that the individual paths derive from removes the whole class,
 with the per-file overrides kept for tests.
 
-### 3. A clearer error when the TUN name is taken
+### 3. `quix update` cannot fix a changed unit file
+
+It swaps binaries only. `v0.1.0` shipped a systemd unit missing
+`QUIX_SETTINGS_PATH`, and no amount of updating repairs that — the unit lives in
+`/etc/systemd/system/`, and only re-running the installer replaces it. Either
+`update` should refresh the unit when it changes, or it should notice and say
+"re-run the installer".
+
+### 4. A clearer error when the TUN name is taken
 
 `Device or resource busy (os error 16)` is what you get when another quixd
 already holds the interface — the normal case for anyone who ran from a build

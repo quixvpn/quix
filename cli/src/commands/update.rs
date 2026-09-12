@@ -22,7 +22,7 @@ pub struct UpdateArgs {
 }
 
 pub async fn run(args: UpdateArgs) -> Result<()> {
-	let current = env!("CARGO_PKG_VERSION");
+	let current = proto::VERSION;
 	let release = latest_release().await?;
 	let latest = release.trim_start_matches('v');
 
@@ -77,7 +77,7 @@ async fn latest_release() -> Result<String> {
 	let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
 	let body: serde_json::Value = reqwest::Client::builder()
 		// GitHub rejects API requests without one.
-		.user_agent(concat!("quix/", env!("CARGO_PKG_VERSION")))
+		.user_agent(format!("quix/{}", proto::VERSION))
 		.timeout(Duration::from_secs(30))
 		.build()?
 		.get(&url)
@@ -117,7 +117,7 @@ async fn download_verified(tag: &str, asset: &str) -> Result<Vec<u8>> {
 
 async fn get(url: &str) -> Result<Vec<u8>> {
 	let response = reqwest::Client::builder()
-		.user_agent(concat!("quix/", env!("CARGO_PKG_VERSION")))
+		.user_agent(format!("quix/{}", proto::VERSION))
 		.timeout(Duration::from_secs(300))
 		.build()?
 		.get(url)

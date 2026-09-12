@@ -11,8 +11,8 @@ mod update;
 use clap::{Parser, Subcommand};
 
 /// Rendered with the leading `v` so it matches the release tag it was built
-/// from — `v0.1.0` here is the `v0.1.0` tag, with nothing to translate.
-pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+/// from, with nothing to translate between the two.
+pub const VERSION: &str = proto::VERSION_TAG;
 
 #[derive(Parser)]
 #[command(
@@ -20,6 +20,7 @@ pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 	about = "P2P mesh VPN over QUIC.",
 	arg_required_else_help = true,
 	before_help = r#"
+    
  ██████╗ ██╗   ██╗██╗██╗  ██╗
 ██╔═══██╗██║   ██║██║╚██╗██╔╝
 ██║   ██║██║   ██║██║ ╚███╔╝ 

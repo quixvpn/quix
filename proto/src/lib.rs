@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// The version these binaries were built from, resolved by `build.rs`: the git
+/// tag in CI, `git describe` locally, `Cargo.toml` as a last resort. Carries no
+/// leading `v` — display code adds it.
+pub const VERSION: &str = env!("QUIX_VERSION");
+
+/// The same version written the way the release tag is, e.g. `v0.1.3`.
+pub const VERSION_TAG: &str = env!("QUIX_VERSION_TAG");
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum Request {

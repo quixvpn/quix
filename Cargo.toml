@@ -2,6 +2,12 @@
 members = ["proto", "cli", "daemon"]
 resolver = "2"
 
+# Bump this before tagging. CI refuses to publish a release whose tag does not
+# match it — a mismatch means the binaries report the wrong version and
+# `quix update` never stops offering an update.
+[workspace.package]
+version = "0.1.3"
+
 [workspace.dependencies]
 iroh = "1"
 tokio = { version = "1", features = ["full"] }

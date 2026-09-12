@@ -57,7 +57,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # On a tag this is what the binaries report; otherwise build.rs falls
+      # back to `git describe`, so a CI build off master is identifiable too.
       - name: build
+        env:
+          QUIX_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
       # Two shapes of asset: an archive for people installing by hand, and the

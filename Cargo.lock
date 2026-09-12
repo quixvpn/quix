@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "serde",
 ]
@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "quix-cli"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "quix-daemon"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "bs58",
