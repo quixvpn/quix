@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args;
 use sha2::{Digest, Sha256};
 
+use crate::service_manager as manager;
+
 const REPO: &str = "quixvpn/quix";
-const SERVICE: &str = "quixd";
 const BINARIES: [&str; 2] = ["quix", "quixd"];
 
 /// Download and install the latest release
@@ -49,10 +49,10 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
 		staged.push((name, download_verified(&release, &asset).await?));
 	}
 
-	let was_running = service_is_running();
+	let was_running = manager::state().running;
 	if was_running {
-		println!("stopping {SERVICE}");
-		stop_service().context("could not stop the service")?;
+		println!("stopping {}", manager::NAME);
+		manager::stop().context("could not stop the service")?;
 	}
 
 	for (name, bytes) in &staged {
@@ -61,13 +61,13 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
 	}
 
 	if was_running {
-		println!("starting {SERVICE}");
-		start_service().context("binaries were updated, but the service did not restart")?;
+		println!("starting {}", manager::NAME);
+		manager::start().context("binaries were updated, but the service did not restart")?;
 	}
 
 	println!("updated to {latest}");
 	if !was_running {
-		println!("note: the {SERVICE} service was not running, so it was left alone");
+		println!("note: the {} service was not running, so it was left alone", manager::NAME);
 	}
 	Ok(())
 }
@@ -200,68 +200,6 @@ fn exe(name: &str) -> String {
 
 fn hex(bytes: &[u8]) -> String {
 	bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-#[cfg(unix)]
-fn service_is_running() -> bool {
-	Command::new("systemctl")
-		.args(["is-active", "--quiet", SERVICE])
-		.status()
-		.map(|s| s.success())
-		.unwrap_or(false)
-}
-
-#[cfg(unix)]
-fn stop_service() -> Result<()> {
-	run_ok(Command::new("systemctl").args(["stop", SERVICE]))
-}
-
-#[cfg(unix)]
-fn start_service() -> Result<()> {
-	run_ok(Command::new("systemctl").args(["start", SERVICE]))
-}
-
-#[cfg(windows)]
-fn service_is_running() -> bool {
-	Command::new("sc")
-		.args(["query", SERVICE])
-		.output()
-		.map(|out| String::from_utf8_lossy(&out.stdout).contains("RUNNING"))
-		.unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn stop_service() -> Result<()> {
-	run_ok(Command::new("sc").args(["stop", SERVICE]))?;
-
-	// `sc stop` only asks; the file stays locked until the process exits, so
-	// wait for it rather than racing the replacement.
-	for _ in 0..40 {
-		if !service_is_running() {
-			// The handle can outlive the RUNNING state by a moment.
-			std::thread::sleep(Duration::from_millis(500));
-			return Ok(());
-		}
-		std::thread::sleep(Duration::from_millis(500));
-	}
-	anyhow::bail!("the service did not stop within 20s")
-}
-
-#[cfg(windows)]
-fn start_service() -> Result<()> {
-	run_ok(Command::new("sc").args(["start", SERVICE]))
-}
-
-fn run_ok(command: &mut Command) -> Result<()> {
-	let output = command.output().context("running the service manager")?;
-	if output.status.success() {
-		return Ok(());
-	}
-	let mut message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-	if message.is_empty() {
-		message = String::from_utf8_lossy(&output.stdout).trim().to_string();
-	}
-	anyhow::bail!("{message}")
 }
 
 #[cfg(test)]

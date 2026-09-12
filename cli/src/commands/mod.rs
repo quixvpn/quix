@@ -5,6 +5,7 @@ mod join;
 mod leave;
 mod operator;
 mod ping;
+mod service;
 mod status;
 mod update;
 
@@ -50,6 +51,8 @@ pub enum Command {
 	Status(status::StatusArgs),
 	/// Let a local user run mutating commands without sudo (root only)
 	SetOperator(operator::SetOperatorArgs),
+	/// Control the background daemon
+	Service(service::ServiceArgs),
 	/// Download and install the latest release
 	Update(update::UpdateArgs),
 	/// Show the installed version
@@ -67,6 +70,7 @@ pub async fn run() -> anyhow::Result<()> {
 		Command::Ping(args) => ping::run(args).await,
 		Command::Status(args) => status::run(args).await,
 		Command::SetOperator(args) => operator::run(args).await,
+		Command::Service(args) => service::run(args).await,
 		Command::Update(args) => update::run(args).await,
 		Command::Version => {
 			println!("quix {VERSION}");

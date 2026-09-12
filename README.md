@@ -152,6 +152,9 @@ QUIX_SOCKET=/tmp/quix.sock ./target/debug/quix status
 | `quix status -v` | Adds per-hop packet counters and full endpoint ids |
 | `quix ping <peer-id>` | Probe a peer's link and report RTT |
 | `quix set-operator <user>` | Let a local user run commands without sudo |
+| `quix service status` | Whether the daemon runs now, and whether it starts at boot |
+| `quix service start` \| `stop` \| `restart` | Control the daemon now |
+| `quix service enable` \| `disable` | Control whether it starts at boot |
 | `quix update` | Install the latest release over this one |
 | `quix version` | Installed version, matching the release tag |
 
@@ -176,6 +179,24 @@ peers  1/1 linked
 
 `●` means the data-plane link is up, `○` means the peer is known but not
 currently reachable.
+
+### Controlling the daemon
+
+```bash
+quix service status         # running: yes / at boot: enabled
+sudo quix service stop      # stop it now; it still comes back at boot
+sudo quix service disable   # stop it coming back at boot; leaves it running now
+sudo quix service start     # start it, and wait until it actually answers
+```
+
+"Running now" and "starts at boot" are separate, so `stop` alone doesn't survive
+a reboot and `disable` alone doesn't stop anything today — use both to turn it
+off for good.
+
+`start` and `restart` return only once the daemon is answering, not merely once
+the process exists. The service manager reports success immediately, but the
+daemon still has to pick a relay, bring the TUN up and bind its socket, so a
+bare `systemctl start` followed by `quix status` can race.
 
 ### Updating
 
