@@ -293,7 +293,15 @@ try {
     # Add-Member -Force so an existing operator is replaced rather than doubled.
     $settings | Add-Member -NotePropertyName operator_sid -NotePropertyValue $OperatorSid -Force
     $settings | Add-Member -NotePropertyName operator_name -NotePropertyValue $operatorAccount -Force
-    $settings | ConvertTo-Json | Set-Content -Path $settingsPath -Encoding utf8
+
+    # WriteAllText with an explicit no-BOM encoding, NOT Set-Content -Encoding
+    # utf8: in Windows PowerShell that means utf8 *with* a byte order mark, and
+    # those three bytes are a syntax error to the JSON parser on the other side.
+    # The daemon tolerates one now, but there is no reason to write one.
+    [IO.File]::WriteAllText(
+        $settingsPath,
+        ($settings | ConvertTo-Json),
+        (New-Object Text.UTF8Encoding($false)))
 
     # Come back automatically after a crash, matching Restart=on-failure on Linux.
     & sc.exe failure $Service reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null

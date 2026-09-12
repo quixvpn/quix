@@ -307,7 +307,7 @@ involving the system resolver at all:
 ```bash
 dig @127.0.0.1 -p 5354 nas.homelab.quix AAAA   # host.network.quix
 dig @127.0.0.1 -p 5354 nas.quix AAAA           # flat form, same answer
-dig @127.0.0.1 -p 5354 dd0f06dd.quix A         # the fallback name works too
+dig @127.0.0.1 -p 5354 1234abcd.quix A         # the fallback name works too
 ```
 
 ```powershell

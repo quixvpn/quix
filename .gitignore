@@ -1,1 +1,9 @@
 target
+
+# Daemon state, if a build tree is ever used as one. The key is this node's
+# whole identity on the mesh and network.json holds live invite tokens; neither
+# belongs in version control.
+key
+network.json
+settings.json
+quixd.log

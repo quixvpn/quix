@@ -171,11 +171,19 @@ impl Membership {
 	pub fn load() -> Result<Self> {
 		let path = path()?;
 		match std::fs::read_to_string(&path) {
-			Ok(data) => serde_json::from_str(&data)
-				.with_context(|| format!("parse {}", path.display())),
+			Ok(data) => Self::parse(&data).with_context(|| format!("parse {}", path.display())),
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
 			Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
 		}
+	}
+
+	/// Parses the roster, tolerating a leading byte order mark.
+	///
+	/// Nothing we write adds one, but Notepad and PowerShell both do, and this
+	/// file failing to parse stops the daemon starting. Three invisible bytes
+	/// should not cost someone their mesh.
+	fn parse(data: &str) -> Result<Self> {
+		Ok(serde_json::from_str(data.trim_start_matches('\u{feff}'))?)
 	}
 
 	pub fn save(&self) -> Result<()> {
@@ -652,7 +660,7 @@ mod tests {
 		let mut m: Membership = serde_json::from_str(&stored).expect("an existing file must load");
 
 		assert!(m.pending_invites.is_empty(), "dropped on load");
-		let token = hex::decode("bfc15e2af04b02803f18d1f735eaedad").unwrap();
+		let token = hex::decode(LEGACY_TOKEN).unwrap();
 		assert!(!m.redeem_invite(&token.try_into().unwrap(), id(9), minted_at()));
 	}
 
@@ -815,23 +823,24 @@ mod tests {
 	#[test]
 	fn a_roster_written_before_hostnames_still_loads() {
 		// Exactly the shape v0.1.x wrote: members as bare id strings, and no
-		// bindings key at all.
-		// these member keys are not valid reachable peers, they are just testing keys
-		let stored = r#"{
-			"network_name": "network",
-			"coordinator_id": "5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",
-			"members": [
-				"5dfdc9f967eca843a7fa04b123ffba9a46b7c6e3f9542f6fb569ddecebbfa257",
-				"dd0f06ddf61e34843f314341496c325238a0bef930431403d0aae6c332a448d2"
-			],
-			"pending_invites": ["bfc15e2af04b02803f18d1f735eaedad"]
-		}"#;
+		// bindings key at all. Keys come from `id()` so nothing in this file
+		// names a real node.
+		let stored = format!(
+			r#"{{
+				"network_name": "network",
+				"coordinator_id": "{first}",
+				"members": ["{first}", "{second}"],
+				"pending_invites": ["000102030405060708090a0b0c0d0e0f"]
+			}}"#,
+			first = id(1),
+			second = id(2),
+		);
 
-		let m: Membership = serde_json::from_str(stored).expect("an existing file must load");
+		let m: Membership = serde_json::from_str(&stored).expect("an existing file must load");
 
 		assert_eq!(m.members.len(), 2);
 		assert!(m.members.iter().all(|member| member.hostname.is_none()));
-		assert!(m.is_member("dd0f06ddf61e34843f314341496c325238a0bef930431403d0aae6c332a448d2"));
+		assert!(m.is_member(&id(2)));
 	}
 
 	#[test]

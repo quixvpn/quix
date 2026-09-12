@@ -43,7 +43,18 @@ impl State {
 			endpoint,
 			tun: Arc::new(tun),
 			membership: Arc::new(Mutex::new(Membership::load()?)),
-			settings: Arc::new(Mutex::new(Settings::load()?)),
+			// Not fatal, unlike the roster. Settings only name the operator, and
+			// failing to read them costs a convenience: without one, mutating
+			// commands fall back to needing root or elevation, which is the
+			// safe direction. Taking the whole mesh down over it is not.
+			settings: Arc::new(Mutex::new(Settings::load().unwrap_or_else(|e| {
+				crate::warn!(
+					"warning: could not load settings ({e:#})\n\
+					 continuing with no operator, so mutating commands will need \
+					 root or elevation until this is fixed"
+				);
+				Settings::default()
+			}))),
 			peers: Peers::default(),
 			routes: Routes::new(crate::tun::interface_name()),
 			stats: Stats::default(),

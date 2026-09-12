@@ -160,11 +160,13 @@ fn with_suffix(base: &str, suffix: &str) -> String {
 mod tests {
 	use super::*;
 
-	const ID: &str = "dd0f06ddf61e34843f314341496c325238a0bef930431403d0aae6c332a448d2";
+	/// An invented endpoint id — 64 hex characters, like the real thing, but
+	/// nobody's. Nothing in this repository should name a machine that exists.
+	const ID: &str = "1234abcd00000000000000000000000000000000000000000000000000000000";
 
 	#[test]
 	fn fallback_is_the_first_eight_hex_characters() {
-		assert_eq!(fallback(ID), "dd0f06dd");
+		assert_eq!(fallback(ID), "1234abcd");
 		// Stable: the same id always gives the same name.
 		assert_eq!(fallback(ID), fallback(ID));
 	}
@@ -172,7 +174,7 @@ mod tests {
 	#[test]
 	fn display_prefers_the_hostname_and_falls_back_otherwise() {
 		assert_eq!(display(ID, Some("nas")), "nas");
-		assert_eq!(display(ID, None), "dd0f06dd");
+		assert_eq!(display(ID, None), "1234abcd");
 	}
 
 	#[test]
@@ -197,7 +199,7 @@ mod tests {
 		// Someone else's fallback would shadow their unforgeable name.
 		assert!(validate("aabbccdd", ID).is_err());
 		// Your own is harmless — it is what you already answer to.
-		assert!(validate("dd0f06dd", ID).is_ok());
+		assert!(validate("1234abcd", ID).is_ok());
 		// Eight characters that are not hex are an ordinary hostname.
 		assert!(validate("frontend", ID).is_ok());
 	}
@@ -248,6 +250,6 @@ mod tests {
 		// Everything is spoken for except the last-resort form, which is keyed
 		// to the claimant and so cannot collide.
 		let assigned = dedupe("web", ID, |n| n != format!("web-{}", fallback(ID)));
-		assert_eq!(assigned, "web-dd0f06dd");
+		assert_eq!(assigned, "web-1234abcd");
 	}
 }

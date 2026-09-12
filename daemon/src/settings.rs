@@ -35,12 +35,20 @@ impl Settings {
 	pub fn load() -> Result<Self> {
 		let path = path()?;
 		match std::fs::read_to_string(&path) {
-			Ok(data) => {
-				serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))
-			}
+			Ok(data) => Self::parse(&data).with_context(|| format!("parse {}", path.display())),
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
 			Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
 		}
+	}
+
+	/// Parses the file's contents, tolerating a leading byte order mark.
+	///
+	/// The Windows installer writes this file from PowerShell, whose `utf8`
+	/// encoding means *with* a BOM, and Notepad adds one too. `serde_json` does
+	/// not skip it, and this file failing to parse stops the daemon starting —
+	/// far too much to lose to three invisible bytes.
+	fn parse(data: &str) -> Result<Self> {
+		Ok(serde_json::from_str(data.trim_start_matches('\u{feff}'))?)
 	}
 
 	pub fn save(&self) -> Result<()> {
@@ -68,7 +76,7 @@ mod tests {
     "operator_name":  "TESTBOX\\testuser"
 }"#;
 
-		let settings: Settings = serde_json::from_str(written).expect("installer output must load");
+		let settings = Settings::parse(written).expect("installer output must load");
 
 		assert_eq!(
 			settings.operator_sid.as_deref(),
@@ -79,10 +87,29 @@ mod tests {
 	}
 
 	#[test]
+	fn a_byte_order_mark_does_not_stop_the_daemon_starting() {
+		// Windows PowerShell's `Set-Content -Encoding utf8` writes EF BB BF, and
+		// the installer writes this file. serde_json does not skip a BOM, so
+		// this parse failure propagated out of Settings::load, out of
+		// State::new, and killed the service before it could log why.
+		let written = "\u{feff}{\"operator_uid\": 1000}";
+
+		// The reason this is needed at all, pinned so it stays true: serde_json
+		// treats the mark as a syntax error rather than skipping it.
+		assert!(
+			serde_json::from_str::<Settings>(written).is_err(),
+			"if serde starts skipping BOMs this test is no longer proving anything"
+		);
+
+		let settings = Settings::parse(written).expect("a BOM must not be fatal");
+		assert_eq!(settings.operator_uid, Some(1000));
+	}
+
+	#[test]
 	fn a_settings_file_from_before_the_windows_operator_still_loads() {
 		let stored = r#"{"operator_uid": 1000, "operator_name": "alice"}"#;
 
-		let settings: Settings = serde_json::from_str(stored).expect("must load");
+		let settings = Settings::parse(stored).expect("must load");
 
 		assert_eq!(settings.operator_uid, Some(1000));
 		assert_eq!(settings.operator_sid, None);
@@ -90,7 +117,7 @@ mod tests {
 
 	#[test]
 	fn an_empty_file_means_no_operator_rather_than_a_failure() {
-		let settings: Settings = serde_json::from_str("{}").expect("must load");
+		let settings = Settings::parse("{}").expect("must load");
 		assert_eq!(settings.operator_uid, None);
 		assert_eq!(settings.operator_sid, None);
 	}
