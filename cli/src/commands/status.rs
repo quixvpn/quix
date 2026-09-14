@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use proto::{PeerStatus, Request, Response, Traffic};
+use proto::{DnsRegistration, PeerStatus, Request, Response, Traffic};
 
 use super::client::send;
 
@@ -26,6 +26,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 			zone,
 			traffic,
 			conflicts,
+			dns,
 		} => {
 			let role = if coordinator { "coordinator" } else { "member" };
 			match network {
@@ -37,6 +38,11 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 			println!("IPv4 ----  {v4}");
 			println!("IPv6 ----  {v6}");
 			println!("id ------  {endpoint_id}");
+			// Never behind -v: broken name resolution with nothing on screen to
+			// explain it is exactly the failure this line exists for.
+			if let Some(line) = dns_line(&dns) {
+				println!("{line}");
+			}
 
 			if peers.is_empty() {
 				println!("\nno peers yet");
@@ -87,6 +93,20 @@ fn print_peer(peer: &PeerStatus, zone: &str, verbose: bool) {
 	}
 }
 
+/// Says why names do not resolve through the system, or nothing when they do.
+fn dns_line(dns: &DnsRegistration) -> Option<String> {
+	match dns {
+		DnsRegistration::Registered => None,
+		DnsRegistration::Retrying { fallback } => Some(format!(
+			"dns -----  not registered with the system resolver yet, retrying — \
+			 names resolve only via {fallback} meanwhile"
+		)),
+		DnsRegistration::Unavailable => Some(
+			"dns -----  not registered with the system resolver — the daemon log says why".to_string(),
+		),
+	}
+}
+
 fn print_traffic(traffic: &Traffic) {
 	// Ordered as a packet travels, so the first zero is the failing hop.
 	println!(
@@ -117,3 +137,60 @@ fn print_traffic(traffic: &Traffic) {
 
 /// The TUN MTU, mirrored from the daemon so status can flag a link below it.
 const MTU: u32 = 1280;
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use proto::DnsRegistration;
+
+	#[test]
+	fn nothing_is_said_when_names_resolve_normally() {
+		assert_eq!(dns_line(&DnsRegistration::Registered), None);
+	}
+
+	#[test]
+	fn a_registration_being_retried_says_so_and_where_names_resolve_meanwhile() {
+		let line = dns_line(&DnsRegistration::Retrying {
+			fallback: "127.0.0.1:5354".to_string(),
+		})
+		.expect("a broken resolver must be visible");
+
+		assert!(line.contains("retrying"), "{line}");
+		assert!(line.contains("127.0.0.1:5354"), "{line}");
+	}
+
+	#[test]
+	fn a_registration_nobody_is_retrying_does_not_claim_to_be() {
+		let line = dns_line(&DnsRegistration::Unavailable).expect("a broken resolver must be visible");
+
+		assert!(!line.contains("retrying"), "{line}");
+		assert!(line.contains("log"), "points somewhere to find out why: {line}");
+	}
+
+	#[test]
+	fn a_daemon_from_before_the_field_reads_as_registered() {
+		// A newer CLI talking to an older daemon must not warn about a problem the
+		// daemon never reported.
+		let status = Response::Status {
+			endpoint_id: String::new(),
+			name: String::new(),
+			named: false,
+			v6: String::new(),
+			v4: String::new(),
+			network: None,
+			coordinator: false,
+			peers: vec![],
+			zone: "quix".to_string(),
+			traffic: Traffic::default(),
+			conflicts: vec![],
+			dns: DnsRegistration::Unavailable,
+		};
+		let mut json = serde_json::to_value(&status).unwrap();
+		json["Status"].as_object_mut().unwrap().remove("dns");
+
+		match serde_json::from_value::<Response>(json).unwrap() {
+			Response::Status { dns, .. } => assert_eq!(dns, DnsRegistration::Registered),
+			other => panic!("expected a status, got {other:?}"),
+		}
+	}
+}

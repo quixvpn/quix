@@ -79,6 +79,24 @@ pub struct Traffic {
 	pub tun_tx_err: u64,
 }
 
+/// Whether `.quix` names resolve through the operating system's resolver, or
+/// only by asking this node's resolver directly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DnsRegistration {
+	/// The system resolver sends `.quix` queries here. Also what a status from a
+	/// daemon that predates this field reads as, so an older daemon never looks
+	/// broken to a newer CLI.
+	#[default]
+	Registered,
+	/// Not registered yet, and the daemon keeps trying. Meanwhile names resolve
+	/// only by asking `fallback` directly.
+	Retrying { fallback: String },
+	/// Not registered and not being retried: the resolver has no address the
+	/// system could be pointed at. The daemon's log says why.
+	Unavailable,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 // Status carries far more than the other variants, but exactly one Response is
 // built and consumed per command, so boxing it would buy an allocation and an
@@ -101,6 +119,10 @@ pub enum Response {
 		traffic: Traffic,
 		/// Hostnames a roster push tried to rebind and we refused.
 		conflicts: Vec<String>,
+		/// Whether names resolve through the system resolver. Defaulted so a CLI
+		/// can still read a status from a daemon that predates it.
+		#[serde(default)]
+		dns: DnsRegistration,
 	},
 	Pong { v6: String, v4: String, rtt_ms: Option<f64> },
 	Invite {

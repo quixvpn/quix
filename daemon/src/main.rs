@@ -10,6 +10,7 @@ mod membership;
 mod mesh;
 mod names;
 mod peers;
+mod registration;
 mod resolv;
 mod routes;
 #[cfg(windows)]
@@ -102,14 +103,6 @@ pub fn runtime() -> Result<tokio::runtime::Runtime> {
 		.build()?)
 }
 
-/// Where names still resolve when OS integration could not be set up. Always
-/// available, since it is the one endpoint the resolver refuses to start without.
-fn fallback_resolver() -> String {
-	dns::listen_addr()
-		.map(|addr| addr.to_string())
-		.unwrap_or_default()
-}
-
 /// Runs the daemon until `shutdown` resolves.
 pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	let secret_key = identity::load_or_create()?;
@@ -165,60 +158,21 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 	// The resolver is not essential to the mesh: a failure here costs name
 	// resolution, not traffic, so it warns rather than stopping the daemon.
 	//
-	// Registration happens once at startup, not per network: the zone we claim
-	// is all of `.quix`, which does not change as networks are created, joined
-	// or left.
-	let iface = tun::interface_name();
-	let mut registered = false;
-
-	match dns::bind(&state).await {
+	// Registration is for all of `.quix`, not per network: the zone we claim does
+	// not change as networks are created, joined or left.
+	let registration = match dns::bind(&state).await {
 		Ok((sockets, candidates)) => {
 			// Serving starts first: the reachability check is answered by these
 			// very sockets, so nothing can be verified until they are live.
 			tokio::spawn(dns::serve(state.clone(), sockets));
-
-			match dns::reachable_server(&candidates).await {
-				Some(server) => match resolv::register(&iface, server).await {
-					Ok(()) => {
-						crate::info!(
-							"registered *.{} with the system resolver via {server}",
-							dns::ZONE
-						);
-						registered = true;
-					}
-					Err(e) => crate::warn!(
-						"warning: could not register *.{} with the system resolver: {e:#}\n\
-						 names still resolve via {}",
-						dns::ZONE,
-						fallback_resolver()
-					),
-				},
-				// Nothing bound at all — `bind` has already said why for each
-				// address, so repeating it here would only bury that.
-				None if candidates.is_empty() => crate::warn!(
-					"warning: no mesh address could be bound, so *.{} was not registered with \
-					 the system resolver\n\
-					 names still resolve via {}",
-					dns::ZONE,
-					fallback_resolver()
-				),
-				// Bound, but unreachable. Registering such an address is worse
-				// than registering nothing: every lookup times out instead of
-				// failing, and the daemon reports success while doing it.
-				None => crate::warn!(
-					"warning: nothing on this machine can reach the {} resolver, so it was not \
-					 registered with the system resolver\n\
-					 another VPN's IPv6 leak protection unbinds IPv6 from every adapter, and its \
-					 DNS leak protection filters port {}; either will do this\n\
-					 names still resolve via {}",
-					dns::ZONE,
-					dns::ZONE_PORT,
-					fallback_resolver()
-				),
-			}
+			Some(registration::start(state.clone(), tun::interface_name(), candidates).await)
 		}
-		Err(e) => crate::warn!("warning: resolver did not start: {e:#}"),
-	}
+		// `status` already reports this as unavailable: nothing was ever tried.
+		Err(e) => {
+			crate::warn!("warning: resolver did not start: {e:#}");
+			None
+		}
+	};
 
 	tokio::spawn(mesh::tun_to_mesh(state.clone()));
 	tokio::spawn(mesh::dialer(state.clone(), dial_rx));
@@ -231,13 +185,10 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 		}
 	};
 
-	// Hand the zone back before going away. On Linux the per-link settings would
-	// vanish with the interface anyway; on Windows the NRPT rule is in the
-	// registry and would outlive us.
-	if registered {
-		if let Err(e) = resolv::deregister(&iface).await {
-			crate::warn!("warning: could not release *.{}: {e:#}", dns::ZONE);
-		}
+	// Stop any retry still trying to claim the zone, and hand it back before
+	// going away.
+	if let Some(registration) = registration {
+		registration.stop().await;
 	}
 
 	router.shutdown().await?;

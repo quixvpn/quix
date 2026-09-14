@@ -7,6 +7,8 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tun_rs::AsyncDevice;
 
+use proto::DnsRegistration;
+
 use crate::membership::{Member, Membership};
 use crate::peers::Peers;
 use crate::routes::Routes;
@@ -24,6 +26,8 @@ pub struct State {
 	stats: Stats,
 	/// Naming conflicts reported by the last roster push.
 	conflicts: Arc<Mutex<Vec<String>>>,
+	/// How `.quix` registration with the system resolver stands, for `status`.
+	dns: Arc<Mutex<DnsRegistration>>,
 	dial_tx: mpsc::Sender<EndpointId>,
 }
 
@@ -59,6 +63,8 @@ impl State {
 			routes: Routes::new(crate::tun::interface_name()),
 			stats: Stats::default(),
 			conflicts: Arc::new(Mutex::new(Vec::new())),
+			// Nothing has been tried yet, so nothing is registered.
+			dns: Arc::new(Mutex::new(DnsRegistration::Unavailable)),
 			dial_tx,
 		})
 	}
@@ -228,6 +234,15 @@ impl State {
 	/// Naming conflicts from the most recent roster push, surfaced in `status`.
 	pub async fn conflicts(&self) -> Vec<String> {
 		self.conflicts.lock().await.clone()
+	}
+
+	/// Records how `.quix` registration stands, so `status` can show it.
+	pub async fn set_dns(&self, dns: DnsRegistration) {
+		*self.dns.lock().await = dns;
+	}
+
+	pub async fn dns(&self) -> DnsRegistration {
+		self.dns.lock().await.clone()
 	}
 
 	/// Leaves the network: forgets the roster, tears down the routes it put in
