@@ -11,10 +11,11 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use proto::DnsRegistration;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::dns::{self, ZONE};
@@ -29,6 +30,11 @@ const FIRST_RETRY: Duration = Duration::from_secs(2);
 /// broken in the first place.
 const MAX_RETRY: Duration = Duration::from_secs(60);
 
+/// How long shutdown waits for a registration command already in progress.
+/// Normally a second or two; this only bites on one that has hung. Inside
+/// systemd's 15s stop timeout, so the daemon still gets to clean up after it.
+const STOP_LIMIT: Duration = Duration::from_secs(10);
+
 /// A registration in progress: whatever is still retrying, and whether the
 /// system resolver may hold something of ours that has to be handed back.
 pub struct Registration {
@@ -37,7 +43,8 @@ pub struct Registration {
 	/// succeeded, so a daemon stopped halfway through adding the rule still
 	/// removes it. Removing is safe when nothing was added.
 	attempted: Arc<AtomicBool>,
-	retrying: Option<JoinHandle<()>>,
+	/// The background retry, and the signal that asks it to stop.
+	retrying: Option<(JoinHandle<()>, watch::Sender<bool>)>,
 }
 
 /// Why one attempt did not register.
@@ -46,6 +53,15 @@ enum Failure {
 	Unreachable,
 	/// An address answered, but the system resolver could not be pointed at it.
 	Register(anyhow::Error),
+}
+
+/// How a background retry run ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome<T> {
+	/// Registered with `target`, after `retries` retries.
+	Succeeded { retries: u32, target: T },
+	/// Asked to stop before it registered.
+	Stopped,
 }
 
 /// Registers `.quix` with the system resolver, or keeps trying in the background
@@ -69,6 +85,8 @@ pub async fn start(state: State, iface: String, candidates: Vec<SocketAddr>) -> 
 		return Registration { iface, attempted, retrying: None };
 	}
 
+	// Not cancellable, and needs not be: shutdown is only listened for once
+	// startup is done, so this always finishes before a stop is handled.
 	match attempt(&iface, &candidates, &attempted).await {
 		Ok(server) => {
 			crate::info!("registered *.{ZONE} with the system resolver via {server}");
@@ -80,45 +98,45 @@ pub async fn start(state: State, iface: String, candidates: Vec<SocketAddr>) -> 
 
 	state.set_dns(DnsRegistration::Retrying { fallback }).await;
 
+	let (stop, stop_rx) = watch::channel(false);
 	let retrying = tokio::spawn({
 		let iface = iface.clone();
 		let attempted = attempted.clone();
 		async move {
 			let started = Instant::now();
-			let via = Mutex::new(None);
 
-			let retries = retry_forever(
-				|| async {
-					match attempt(&iface, &candidates, &attempted).await {
-						Ok(server) => {
-							*via.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(server);
-							true
-						}
-						// Silent: the first failure was explained in full, and a
-						// machine where this never works should not add a line to
-						// the log every minute.
-						Err(_) => false,
+			let outcome = retry_until_stopped(
+				|| dns::reachable_server(&candidates),
+				|server| {
+					let (iface, attempted) = (&iface, &attempted);
+					async move {
+						attempted.store(true, Ordering::SeqCst);
+						// Silent on failure: the first one was explained in full,
+						// and a machine where this never works should not add a
+						// line to the log every minute.
+						resolv::register(iface, server).await.is_ok()
 					}
 				},
 				tokio::time::sleep,
+				stop_rx,
 			)
 			.await;
 
-			let via = via.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
-			crate::info!(
-				"registered *.{ZONE} with the system resolver via {} after {} attempts ({}s)",
-				via.map_or_else(|| "a mesh address".to_string(), |server| server.to_string()),
-				retries.saturating_add(1),
-				started.elapsed().as_secs()
-			);
-			state.set_dns(DnsRegistration::Registered).await;
+			if let Outcome::Succeeded { retries, target } = outcome {
+				crate::info!(
+					"registered *.{ZONE} with the system resolver via {target} after {} attempts ({}s)",
+					retries.saturating_add(1),
+					started.elapsed().as_secs()
+				);
+				state.set_dns(DnsRegistration::Registered).await;
+			}
 		}
 	});
 
 	Registration {
 		iface,
 		attempted,
-		retrying: Some(retrying),
+		retrying: Some((retrying, stop)),
 	}
 }
 
@@ -126,10 +144,19 @@ impl Registration {
 	/// Stops retrying, then hands the zone back if the system resolver may hold
 	/// it. On Linux the per-link settings would vanish with the interface anyway;
 	/// on Windows the NRPT rule is in the registry and would outlive us.
+	///
+	/// A registration already in progress is waited for rather than cut off, so
+	/// the removal below always comes after it and cannot be undone by it.
 	pub async fn stop(self) {
-		if let Some(task) = self.retrying {
-			task.abort();
-			let _ = task.await;
+		if let Some((task, stop)) = self.retrying {
+			if !wait_for_stop(task, stop, STOP_LIMIT).await {
+				crate::warn!(
+					"warning: registering *.{ZONE} was still running {}s into shutdown and was \
+					 cancelled; if it had already asked the system to add the rule, that rule may \
+					 outlive this run, and the next start clears it",
+					STOP_LIMIT.as_secs()
+				);
+			}
 		}
 
 		if self.attempted.load(Ordering::SeqCst) {
@@ -201,25 +228,96 @@ fn delay(retry: u32) -> Duration {
 		.map_or(MAX_RETRY, |wait| wait.min(MAX_RETRY))
 }
 
-/// Retries `attempt` until it succeeds, waiting `delay` before each try. Never
-/// gives up. Returns how many retries it took.
+/// Retries until registered or asked to stop, waiting `delay` before each try.
+/// Never gives up on its own.
 ///
-/// The waiting is a parameter so tests can run hundreds of retries without
-/// sitting through them.
-async fn retry_forever<A, AF, S, SF>(mut attempt: A, mut sleep: S) -> u32
+/// A stop is honoured while waiting and while probing, neither of which changes
+/// anything — but never during `register`. A registration already handed to the
+/// system has to be allowed to land, or it could land after shutdown has removed
+/// the rule and leave one pointing at a daemon that is gone. Once it returns,
+/// the stop is honoured before anything else is tried.
+///
+/// Waiting, probing and registering are parameters so tests can drive every
+/// step without a network, a system resolver or a clock.
+async fn retry_until_stopped<T, P, PF, R, RF, S, SF>(
+	mut probe: P,
+	mut register: R,
+	mut sleep: S,
+	mut stop: watch::Receiver<bool>,
+) -> Outcome<T>
 where
-	A: FnMut() -> AF,
-	AF: Future<Output = bool>,
+	T: Copy,
+	P: FnMut() -> PF,
+	PF: Future<Output = Option<T>>,
+	R: FnMut(T) -> RF,
+	RF: Future<Output = bool>,
 	S: FnMut(Duration) -> SF,
 	SF: Future<Output = ()>,
 {
 	let mut retry = 1;
 	loop {
-		sleep(delay(retry)).await;
-		if attempt().await {
-			return retry;
+		if unless_stopped(&mut stop, sleep(delay(retry))).await.is_none() {
+			return Outcome::Stopped;
+		}
+		let Some(found) = unless_stopped(&mut stop, probe()).await else {
+			return Outcome::Stopped;
+		};
+
+		if let Some(target) = found {
+			// The last point a stop can be honoured before something changes on
+			// the system.
+			if stop_requested(&stop) {
+				return Outcome::Stopped;
+			}
+			if register(target).await {
+				return Outcome::Succeeded { retries: retry, target };
+			}
 		}
 		retry = retry.saturating_add(1);
+	}
+}
+
+/// Runs `work` unless a stop is asked for first. `None` means it was stopped.
+async fn unless_stopped<F: Future>(stop: &mut watch::Receiver<bool>, work: F) -> Option<F::Output> {
+	tokio::select! {
+		// Checked first, so a stop that is already in is never beaten by work
+		// that happens to be ready at the same moment.
+		biased;
+		() = stopped(stop) => None,
+		output = work => Some(output),
+	}
+}
+
+/// Resolves once a stop has been asked for, or once nobody is left who could ask:
+/// a dropped sender means the registration it belonged to is gone.
+async fn stopped(stop: &mut watch::Receiver<bool>) {
+	while !*stop.borrow_and_update() {
+		if stop.changed().await.is_err() {
+			return;
+		}
+	}
+}
+
+/// The same question without waiting: has a stop been asked for, or is there no
+/// one left to ask?
+fn stop_requested(stop: &watch::Receiver<bool>) -> bool {
+	*stop.borrow() || stop.has_changed().is_err()
+}
+
+/// Asks a background retry to stop and waits for it, but not past `limit`.
+/// Returns whether it finished on its own; if it did not, it has been cancelled.
+async fn wait_for_stop(task: JoinHandle<()>, stop: watch::Sender<bool>, limit: Duration) -> bool {
+	// An error here only means the task has already finished and let go of its
+	// receiver, which is what stopping was for anyway.
+	let _ = stop.send(true);
+	let abort = task.abort_handle();
+
+	match tokio::time::timeout(limit, task).await {
+		Ok(_) => true,
+		Err(_) => {
+			abort.abort();
+			false
+		}
 	}
 }
 
@@ -246,23 +344,26 @@ mod tests {
 	async fn it_keeps_trying_past_any_number_of_failures() {
 		// Giving up after N attempts is what left names silently broken until
 		// someone happened to restart the daemon.
-		let tries = Cell::new(0u32);
+		let (_never_sent, stop) = watch::channel(false);
+		let registrations = Cell::new(0u32);
 		let waits = RefCell::new(Vec::new());
 
-		let retries = retry_forever(
-			|| {
-				tries.set(tries.get() + 1);
-				let done = tries.get() >= 500;
+		let outcome = retry_until_stopped(
+			|| async { Some("server") },
+			|_| {
+				registrations.set(registrations.get() + 1);
+				let done = registrations.get() >= 500;
 				async move { done }
 			},
 			|wait| {
 				waits.borrow_mut().push(wait);
 				async {}
 			},
+			stop,
 		)
 		.await;
 
-		assert_eq!(retries, 500);
+		assert_eq!(outcome, Outcome::Succeeded { retries: 500, target: "server" });
 		let waits = waits.into_inner();
 		assert_eq!(waits.len(), 500, "a wait before every retry");
 		assert_eq!(waits[..6], [2, 4, 8, 16, 32, 60].map(Duration::from_secs));
@@ -271,18 +372,163 @@ mod tests {
 
 	#[tokio::test]
 	async fn it_stops_at_the_first_success() {
-		let tries = Cell::new(0u32);
+		let (_never_sent, stop) = watch::channel(false);
+		let registrations = Cell::new(0u32);
 
-		let retries = retry_forever(
-			|| {
-				tries.set(tries.get() + 1);
+		let outcome = retry_until_stopped(
+			|| async { Some("server") },
+			|_| {
+				registrations.set(registrations.get() + 1);
 				async { true }
 			},
 			|_| async {},
+			stop,
 		)
 		.await;
 
-		assert_eq!(retries, 1);
-		assert_eq!(tries.get(), 1, "nothing more once it has worked");
+		assert_eq!(outcome, Outcome::Succeeded { retries: 1, target: "server" });
+		assert_eq!(registrations.get(), 1, "nothing more once it has worked");
+	}
+
+	#[tokio::test]
+	async fn nothing_is_registered_until_an_address_answers() {
+		// Pointing the system at an address nobody answers on is worse than not
+		// registering at all: every lookup would time out instead of failing.
+		let (_never_sent, stop) = watch::channel(false);
+		let probes = Cell::new(0u32);
+		let registrations = Cell::new(0u32);
+
+		let outcome = retry_until_stopped(
+			|| {
+				probes.set(probes.get() + 1);
+				let found = (probes.get() >= 3).then_some("server");
+				async move { found }
+			},
+			|_| {
+				registrations.set(registrations.get() + 1);
+				async { true }
+			},
+			|_| async {},
+			stop,
+		)
+		.await;
+
+		assert_eq!(outcome, Outcome::Succeeded { retries: 3, target: "server" });
+		assert_eq!(registrations.get(), 1, "only once something answered");
+	}
+
+	#[tokio::test]
+	async fn a_stop_during_a_wait_ends_the_run_without_another_attempt() {
+		let (stop_tx, stop) = watch::channel(false);
+		let probes = Cell::new(0u32);
+
+		let run = retry_until_stopped(
+			|| {
+				probes.set(probes.get() + 1);
+				async { Some("server") }
+			},
+			|_| async { true },
+			// A wait that would never end on its own.
+			|_| std::future::pending::<()>(),
+			stop,
+		);
+		let stopper = async {
+			tokio::task::yield_now().await;
+			stop_tx.send(true).unwrap();
+		};
+
+		let (outcome, ()) = tokio::join!(run, stopper);
+
+		assert_eq!(outcome, Outcome::Stopped);
+		assert_eq!(probes.get(), 0, "nothing was attempted after the stop");
+	}
+
+	#[tokio::test]
+	async fn a_stop_while_registering_waits_for_the_registration_to_land() {
+		// The race this exists for: a registration already handed to the system
+		// resolver landing after shutdown has removed the rule, leaving a rule
+		// that points at a daemon that is gone.
+		let (stop_tx, stop) = watch::channel(false);
+		let (release, released) = tokio::sync::oneshot::channel::<()>();
+		let released = Cell::new(Some(released));
+		let registering = Cell::new(false);
+		let registrations = Cell::new(0u32);
+		let finished = Cell::new(false);
+
+		let run = async {
+			let outcome = retry_until_stopped(
+				|| async { Some("server") },
+				|_| {
+					registrations.set(registrations.get() + 1);
+					registering.set(true);
+					let released = released.take();
+					async move {
+						if let Some(released) = released {
+							let _ = released.await;
+						}
+						// Failed, so without the stop there would be another try.
+						false
+					}
+				},
+				|_| async {},
+				stop,
+			)
+			.await;
+			finished.set(true);
+			outcome
+		};
+
+		let stopper = async {
+			while !registering.get() {
+				tokio::task::yield_now().await;
+			}
+			stop_tx.send(true).unwrap();
+			for _ in 0..20 {
+				tokio::task::yield_now().await;
+			}
+			assert!(!finished.get(), "must not return while a registration is in flight");
+			release.send(()).unwrap();
+		};
+
+		let (outcome, ()) = tokio::join!(run, stopper);
+
+		assert_eq!(outcome, Outcome::Stopped);
+		assert_eq!(registrations.get(), 1, "nothing is attempted once stop was asked for");
+	}
+
+	#[tokio::test]
+	async fn stopping_waits_for_a_task_that_honours_the_stop() {
+		let (stop_tx, mut stop_rx) = watch::channel(false);
+		let task = tokio::spawn(async move { stopped(&mut stop_rx).await });
+
+		assert!(wait_for_stop(task, stop_tx, Duration::from_secs(5)).await);
+	}
+
+	#[tokio::test]
+	async fn stopping_a_task_that_already_finished_is_a_no_op() {
+		let (stop_tx, _stop_rx) = watch::channel(false);
+		let task = tokio::spawn(async {});
+		tokio::task::yield_now().await;
+
+		assert!(wait_for_stop(task, stop_tx, Duration::from_secs(5)).await);
+	}
+
+	#[tokio::test]
+	async fn a_task_that_does_not_stop_in_time_is_cancelled() {
+		// The last resort for a registration command that hangs: shutdown cannot
+		// wait on it forever.
+		let (stop_tx, _stop_rx) = watch::channel(false);
+		let task = tokio::spawn(std::future::pending::<()>());
+		let abort = task.abort_handle();
+
+		assert!(!wait_for_stop(task, stop_tx, Duration::from_millis(50)).await);
+
+		for _ in 0..100 {
+			if abort.is_finished() {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		assert!(abort.is_finished(), "cancelled rather than left running");
 	}
 }
