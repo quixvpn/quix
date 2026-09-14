@@ -116,12 +116,14 @@ pub async fn bind(state: &State) -> Result<(Vec<UdpSocket>, Vec<SocketAddr>)> {
 ///
 /// Must be called once the sockets are being served, since it is those very
 /// sockets that answer the probe.
+///
+/// Quiet about failures: this runs on every registration retry, and the caller
+/// explains a failure once, naming every address it tried.
 pub async fn reachable_server(candidates: &[SocketAddr]) -> Option<SocketAddr> {
 	for &addr in candidates {
 		if probe(addr).await {
 			return Some(addr);
 		}
-		crate::warn!("warning: the {ZONE} resolver is bound to {addr} but nothing can reach it there");
 	}
 	None
 }

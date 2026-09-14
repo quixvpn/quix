@@ -127,6 +127,16 @@ Linux registration assumes systemd-resolved. On a host using plain
 through its own port. Rayfish shares `resolv.conf` with other VPNs rather than
 fighting over it, which is the model to copy if this matters.
 
+### Re-register `.quix` if the rule disappears
+
+Registration with the system resolver is retried with backoff until it succeeds,
+but nothing watches it after that. Another tool changing DNS mid-session — a
+VPN's DNS leak protection, which has already happened in practice — can remove
+or override the NRPT rule while the daemon keeps running, and names break
+silently again until the next restart. The daemon should periodically confirm
+the rule is still there and still points at an address that answers, and
+re-register through the same retry loop when it does not.
+
 ### Converging a refused name rebinding
 
 A member that has pinned `nas` to one key refuses a push binding it to another,

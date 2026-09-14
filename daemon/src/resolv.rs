@@ -129,6 +129,11 @@ mod platform {
 async fn run(program: &str, args: &[&str]) -> Result<()> {
 	let output = Command::new(program)
 		.args(args)
+		// Only a last resort. Shutdown waits for a registration in progress
+		// rather than dropping it, and gives up only on one that has hung —
+		// killing the client does not undo a change it has already handed to the
+		// system, which is why waiting is the real guarantee.
+		.kill_on_drop(true)
 		.output()
 		.await
 		.with_context(|| format!("running {program}"))?;

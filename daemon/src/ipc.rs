@@ -169,6 +169,7 @@ async fn dispatch(req: Request, state: &State) -> Response {
 				peers,
 				zone: zone.clone(),
 				conflicts: state.conflicts().await,
+				dns: state.dns().await,
 			}
 		}
 
