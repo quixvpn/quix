@@ -5,7 +5,11 @@ Installs quix and quixd, puts them on PATH, and runs the daemon as a Windows ser
 .EXAMPLE
     .\install.ps1              # from the latest GitHub release
     .\install.ps1 -Local       # from .\target\release (builds if needed)
+    .\install.ps1 -From DIR    # from the quix.exe and quixd.exe in DIR
     .\install.ps1 -Uninstall
+
+Add -KeepOperator to leave an operator that is already set alone; `quix update`
+passes it.
 
 Installing a service and editing the machine PATH both need Administrator. Run
 this from an ordinary PowerShell and it asks for it: no elevated terminal needed.
@@ -14,6 +18,13 @@ this from an ordinary PowerShell and it asks for it: no elevated terminal needed
 param(
     [switch]$Local,
     [switch]$Uninstall,
+    # Install the quix.exe and quixd.exe found in this directory: no download and
+    # no build. `quix update` points it at the release archive it just verified.
+    [string]$From,
+    # Leave an operator already recorded in settings.json alone. `quix update`
+    # passes it, so an update never hands the machine to whichever administrator
+    # approved the UAC prompt.
+    [switch]$KeepOperator,
     [string]$InstallDir = "$env:ProgramFiles\quix",
     [string]$Repo = 'quixvpn/quix',
     # Set when this script re-runs itself elevated: where to transcribe output
@@ -29,6 +40,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Service = 'quixd'
+
+# Captured here because inside a function $PSBoundParameters is that function's
+# own, empty set — forwarding it from Invoke-SelfElevated silently dropped every
+# flag the user passed.
+$ScriptParameters = $PSBoundParameters
 
 function Info($msg) { Write-Host "==> $msg" }
 
@@ -71,7 +87,7 @@ function Invoke-SelfElevated {
 
     $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script`"",
               '-LogTo', "`"$log`"", '-OperatorSid', "`"$sid`"")
-    foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+    foreach ($entry in $ScriptParameters.GetEnumerator()) {
         if ($entry.Key -in 'LogTo', 'OperatorSid') { continue }
         if ($entry.Value -is [switch]) {
             if ($entry.Value.IsPresent) { $argv += "-$($entry.Key)" }
@@ -140,6 +156,24 @@ function Resolve-OperatorAccount($sid) {
     return $account
 }
 
+# Refused before asking for elevation: a UAC prompt followed by "these cannot be
+# combined" is a bad trade.
+if ($Local -and $From) {
+    Write-Host '-Local and -From cannot be combined: pick one source'
+    exit 1
+}
+
+# Made absolute on this side of the prompt: the elevated copy starts in
+# System32, where a relative path means something else entirely.
+if ($From) {
+    if (-not (Test-Path -LiteralPath $From -PathType Container)) {
+        Write-Host "-From: $From is not a directory"
+        exit 1
+    }
+    $From = (Resolve-Path -LiteralPath $From).Path
+    $ScriptParameters['From'] = $From
+}
+
 if (-not (Test-Administrator)) { Invoke-SelfElevated }
 
 # Run elevated directly and nobody passed one, so the person at the keyboard is
@@ -163,6 +197,42 @@ function Remove-QuixService {
     }
 }
 
+<#
+.SYNOPSIS
+Puts one binary in place without ever overwriting a file that may be running.
+
+.DESCRIPTION
+Windows refuses to overwrite a running executable but allows renaming it, and
+both quixd.exe (the service) and quix.exe (the `quix update` that launched this
+installer) may be running. So the new copy is written beside the old one, the old
+one is renamed aside under a name nothing else can be holding, and the new one
+takes its place. If that last step fails the old one is put back, so the name
+never points at nothing.
+#>
+function Install-Binary($source, $name) {
+    $target = Join-Path $InstallDir $name
+    $new = "$target.new"
+
+    Copy-Item -LiteralPath $source -Destination $new -Force
+
+    $old = $null
+    if (Test-Path -LiteralPath $target) {
+        $old = "$target.$([Guid]::NewGuid()).old"
+        Move-Item -LiteralPath $target -Destination $old
+    }
+
+    try {
+        Move-Item -LiteralPath $new -Destination $target
+    }
+    catch {
+        if ($old) { Move-Item -LiteralPath $old -Destination $target -Force }
+        throw
+    }
+
+    # Fails while the old process still has it mapped; the next run clears it.
+    if ($old) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
+}
+
 if ($Uninstall) {
     Remove-QuixService
     if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
@@ -177,6 +247,7 @@ if ($Uninstall) {
 
 $stage = Join-Path ([IO.Path]::GetTempPath()) ("quix-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $stage | Out-Null
+$restarted = $false
 
 try {
     if ($Local) {
@@ -187,6 +258,10 @@ try {
             try { cargo build --release --workspace } finally { Pop-Location }
         }
         Copy-Item "$root\target\release\quix.exe", "$root\target\release\quixd.exe" $stage
+        $source = $stage
+    }
+    elseif ($From) {
+        $source = $From
     }
     else {
         $asset = 'quix-windows-x86_64.zip'
@@ -203,18 +278,26 @@ try {
 
         Expand-Archive -Path "$stage\$asset" -DestinationPath $stage -Force
         Get-ChildItem -Path $stage -Recurse -Filter '*.exe' | Copy-Item -Destination $stage -ErrorAction SilentlyContinue
+        $source = $stage
     }
 
     foreach ($exe in 'quix.exe', 'quixd.exe') {
-        if (-not (Test-Path (Join-Path $stage $exe))) { throw "$exe missing from the package" }
+        if (-not (Test-Path -LiteralPath (Join-Path $source $exe))) { throw "$exe missing from $source" }
     }
-
-    # The service holds quixd.exe open, so it has to go before the copy.
-    Remove-QuixService
 
     Info "installing to $InstallDir"
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item (Join-Path $stage 'quix.exe'), (Join-Path $stage 'quixd.exe') $InstallDir -Force
+
+    # Copies renamed aside by earlier runs, now that whatever held them has
+    # exited. Anything still in use stays until the next run.
+    Get-ChildItem -LiteralPath $InstallDir -Filter '*.old' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
+    # Nothing is stopped first: the running daemon keeps the file it was started
+    # from, and the only downtime is the restart at the end.
+    foreach ($exe in 'quix.exe', 'quixd.exe') {
+        Install-Binary (Join-Path $source $exe) $exe
+    }
 
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     if (($machinePath -split ';') -notcontains $InstallDir) {
@@ -223,13 +306,37 @@ try {
         $env:Path = "$env:Path;$InstallDir"
     }
 
-    Info "registering the $Service service"
-    # LocalSystem: creating the Wintun adapter and installing routes needs it.
-    New-Service -Name $Service `
-        -BinaryPathName "`"$InstallDir\quixd.exe`"" `
-        -DisplayName 'Quix P2P mesh VPN' `
-        -Description 'Runs the quix mesh VPN data plane and local control socket.' `
-        -StartupType Automatic | Out-Null
+    $binaryPath = "`"$InstallDir\quixd.exe`""
+    $displayName = 'Quix P2P mesh VPN'
+    $description = 'Runs the quix mesh VPN data plane and local control socket.'
+
+    if (Get-Service -Name $Service -ErrorAction SilentlyContinue) {
+        # Reconfigured in place. Deleting and recreating it raced the SCM's
+        # "marked for deletion" state, and left no service at all if anything
+        # after the delete failed. Through CIM rather than sc.exe: Windows
+        # PowerShell mangles the embedded quotes a path with spaces needs when
+        # passing it to a native program.
+        Info "updating the $Service service"
+        $result = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Service'" |
+            Invoke-CimMethod -MethodName Change -Arguments @{
+                PathName    = $binaryPath
+                DisplayName = $displayName
+                StartMode   = 'Automatic'
+            }
+        if ($result.ReturnValue -ne 0) {
+            throw "reconfiguring the $Service service failed (Win32_Service.Change returned $($result.ReturnValue))"
+        }
+        Set-Service -Name $Service -Description $description
+    }
+    else {
+        Info "registering the $Service service"
+        # LocalSystem: creating the Wintun adapter and installing routes needs it.
+        New-Service -Name $Service `
+            -BinaryPathName $binaryPath `
+            -DisplayName $displayName `
+            -Description $description `
+            -StartupType Automatic | Out-Null
+    }
 
     # LocalSystem's profile directory is buried under system32; keep state in
     # ProgramData instead, mirroring what the systemd unit does with /var/lib.
@@ -276,13 +383,11 @@ try {
 
     # Whoever installed it is the obvious operator: they just installed it, and
     # without this every membership command would need a UAC prompt from here
-    # on. Same default as the Linux installer's set-operator on $SUDO_USER.
+    # on. Same default as the Linux installer's set-operator on $SUDO_USER. An
+    # update keeps the operator already chosen instead.
     #
     # Written before the service starts, because the daemon reads its settings
     # once at startup.
-    $operatorAccount = Resolve-OperatorAccount $OperatorSid
-    Info "making $operatorAccount the operator"
-
     $settingsPath = Join-Path $stateDir 'settings.json'
     $settings = if (Test-Path $settingsPath) {
         Get-Content $settingsPath -Raw | ConvertFrom-Json
@@ -290,22 +395,51 @@ try {
     else {
         New-Object PSObject
     }
-    # Add-Member -Force so an existing operator is replaced rather than doubled.
-    $settings | Add-Member -NotePropertyName operator_sid -NotePropertyValue $OperatorSid -Force
-    $settings | Add-Member -NotePropertyName operator_name -NotePropertyValue $operatorAccount -Force
 
-    # WriteAllText with an explicit no-BOM encoding, NOT Set-Content -Encoding
-    # utf8: in Windows PowerShell that means utf8 *with* a byte order mark, and
-    # those three bytes are a syntax error to the JSON parser on the other side.
-    # The daemon tolerates one now, but there is no reason to write one.
-    [IO.File]::WriteAllText(
-        $settingsPath,
-        ($settings | ConvertTo-Json),
-        (New-Object Text.UTF8Encoding($false)))
+    if ($KeepOperator -and $settings.operator_sid) {
+        Info 'keeping the existing operator'
+    }
+    else {
+        $operatorAccount = Resolve-OperatorAccount $OperatorSid
+        Info "making $operatorAccount the operator"
+
+        # Add-Member -Force so an existing operator is replaced rather than doubled.
+        $settings | Add-Member -NotePropertyName operator_sid -NotePropertyValue $OperatorSid -Force
+        $settings | Add-Member -NotePropertyName operator_name -NotePropertyValue $operatorAccount -Force
+
+        # WriteAllText with an explicit no-BOM encoding, NOT Set-Content -Encoding
+        # utf8: in Windows PowerShell that means utf8 *with* a byte order mark, and
+        # those three bytes are a syntax error to the JSON parser on the other side.
+        # The daemon tolerates one now, but there is no reason to write one.
+        [IO.File]::WriteAllText(
+            $settingsPath,
+            ($settings | ConvertTo-Json),
+            (New-Object Text.UTF8Encoding($false)))
+    }
 
     # Come back automatically after a crash, matching Restart=on-failure on Linux.
     & sc.exe failure $Service reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
 
+    # Stopped and started as two steps rather than with Restart-Service. Windows
+    # PowerShell calls a stop failed when the service is neither Stopped nor
+    # StopPending about two seconds in, and quixd — every version already
+    # installed included — reports Running until its shutdown is done, which
+    # takes longer than that while it removes its NRPT rule.
+    $controller = Get-Service -Name $Service
+    if ($controller.Status -ne 'Stopped') {
+        Info "stopping $Service"
+        if ($controller.Status -ne 'StopPending') { $controller.Stop() }
+        try {
+            $controller.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        }
+        catch {
+            throw "$Service did not stop within 30s"
+        }
+    }
+
+    # Only once it has stopped: a stop that fails must still leave recovery to
+    # start it. From here a daemon that will not come up is the SCM's to retry.
+    $restarted = $true
     Start-Service -Name $Service
 
     # The SCM reports Running as soon as the service reports it, which is
@@ -336,6 +470,19 @@ try {
     Write-Host '  quix join <code>     join one'
     Write-Host ''
     Write-Host 'Open a new terminal to pick up the PATH change.'
+}
+catch {
+    # Nothing before the restart stops the service, but a failure must still
+    # never leave it down — including one stopped before we started, since an
+    # install leaves the service running.
+    if (-not $restarted) {
+        $existing = Get-Service -Name $Service -ErrorAction SilentlyContinue
+        if ($existing -and $existing.Status -ne 'Running') {
+            Write-Host "installation failed; starting $Service again"
+            try { Start-Service -Name $Service } catch { Write-Host "could not start ${Service}: $_" }
+        }
+    }
+    throw
 }
 finally {
     Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue

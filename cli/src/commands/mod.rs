@@ -75,9 +75,12 @@ pub enum Command {
 /// Commands that cannot even start without Administrator on Windows.
 ///
 /// Only the ones the *operating system* refuses: the service actions go through
-/// the Service Control Manager and `update` rewrites `Program Files`, and
-/// neither gives a useful answer to an unelevated process, so there is nothing
-/// to do but ask first.
+/// the Service Control Manager, which gives no useful answer to an unelevated
+/// process, so there is nothing to do but ask first.
+///
+/// `update` is absent on purpose. It checks the version first and elevates
+/// itself only once it knows there is something to install, so an up-to-date
+/// machine never sees a prompt.
 ///
 /// The membership commands are deliberately absent. They are gated by the
 /// daemon's own authorization, which the installing user already satisfies, so
@@ -93,8 +96,8 @@ fn needs_elevation(command: &Command) -> bool {
 	match command {
 		// Reading the service's state is not privileged; changing it is.
 		Command::Service(args) => !matches!(args.action, service::Action::Status),
-		// `--check` only asks GitHub what exists and prints it.
-		Command::Update(args) => !args.check,
+		// Asks for itself, after its version check. See the note above.
+		Command::Update(_) => false,
 		// Authorized by the daemon, so these prompt on refusal rather than on
 		// principle.
 		Command::Create(_)
@@ -196,15 +199,11 @@ mod tests {
 	}
 
 	#[test]
-	fn replacing_the_installed_binaries_prompts() {
-		assert!(elevates(&["quix", "update"]));
-		assert!(elevates(&["quix", "update", "--force"]));
-	}
-
-	#[test]
-	fn asking_what_is_available_does_not() {
-		// `--check` returns before it touches the install directory, so the
-		// decision has to follow the parsed arguments, not just the subcommand.
+	fn update_does_not_prompt_before_it_knows_there_is_something_to_install() {
+		// It checks the version first and asks for Administrator itself only when
+		// it is about to install, so an up-to-date machine is never prompted.
+		assert!(!elevates(&["quix", "update"]));
+		assert!(!elevates(&["quix", "update", "--force"]));
 		assert!(!elevates(&["quix", "update", "--check"]));
 	}
 
@@ -224,16 +223,11 @@ mod tests {
 
 	#[test]
 	fn only_what_the_os_itself_refuses_prompts_up_front() {
-		// The dividing line: the SCM and Program Files give an unelevated
-		// process nothing useful, so there is no point asking them first.
-		// Everything else is the daemon's decision, and the daemon can say no
-		// cheaply.
-		for args in [
-			vec!["quix", "service", "restart"],
-			vec!["quix", "update"],
-		] {
-			assert!(elevates(&args), "{args:?}");
-		}
+		// The dividing line: the SCM gives an unelevated process nothing useful,
+		// so there is no point asking it first. Everything else is the daemon's
+		// decision, which it can refuse cheaply, or `update`'s, which asks for
+		// itself once it knows it has something to install.
+		assert!(elevates(&["quix", "service", "restart"]));
 		for args in [
 			vec!["quix", "create", "homelab"],
 			vec!["quix", "status"],

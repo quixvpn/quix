@@ -51,10 +51,49 @@ fn main() -> Result<()> {
 		return Ok(());
 	}
 
-	runtime()?.block_on(run(async {
+	runtime()?.block_on(async {
+		// Installed before the daemon starts, so a stop that arrives while it is
+		// still waiting for a relay is honoured rather than fatal.
+		let shutdown = shutdown_signal();
+		run(shutdown).await
+	})
+}
+
+/// Resolves once the daemon has been asked to stop: Ctrl+C, and on Unix also
+/// SIGTERM, which is how systemd stops a service.
+///
+/// The handlers are installed when this is called, not when the future is first
+/// polled, so a signal arriving in between is held rather than killing the
+/// process. Must be called from inside the runtime.
+// Deliberately not an `async fn`, which would install nothing until first
+// polled. Off Unix there is nothing to install up front, which is all clippy
+// sees there.
+#[cfg_attr(not(unix), allow(clippy::manual_async_fn))]
+fn shutdown_signal() -> impl Future<Output = ()> {
+	#[cfg(unix)]
+	let terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+		Ok(stream) => Some(stream),
+		Err(e) => {
+			// Not fatal: the daemon still runs, it just cannot shut down cleanly
+			// under a service manager.
+			crate::warn!("warning: could not handle SIGTERM ({e}); only Ctrl+C will stop the daemon cleanly");
+			None
+		}
+	};
+
+	async move {
+		#[cfg(unix)]
+		if let Some(mut terminate) = terminate {
+			tokio::select! {
+				_ = tokio::signal::ctrl_c() => crate::info!("interrupted"),
+				_ = terminate.recv() => crate::info!("terminated"),
+			}
+			return;
+		}
+
 		let _ = tokio::signal::ctrl_c().await;
 		crate::info!("interrupted");
-	}))
+	}
 }
 
 pub fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -203,4 +242,26 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 
 	router.shutdown().await?;
 	result
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use super::*;
+	use std::time::Duration;
+
+	#[tokio::test]
+	async fn sigterm_asks_the_daemon_to_stop() {
+		// systemd stops a service with SIGTERM. Unhandled, that kills the process
+		// outright: peers get no close, and the resolver is never deregistered.
+		let shutdown = shutdown_signal();
+
+		// SAFETY: signalling our own process. The handler was installed by the
+		// call above, so this reaches it instead of terminating the test binary.
+		unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+
+		assert!(
+			tokio::time::timeout(Duration::from_secs(5), shutdown).await.is_ok(),
+			"SIGTERM must resolve the shutdown future"
+		);
+	}
 }
