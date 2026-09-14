@@ -85,14 +85,16 @@ curl -fsSL https://raw.githubusercontent.com/quixvpn/quix/master/scripts/install
 Or from a clone, which also lets you install a local build:
 
 ```bash
-sudo ./scripts/install.sh            # from the latest release
-sudo ./scripts/install.sh --local    # from a local build
+sudo ./scripts/install.sh              # from the latest release
+sudo ./scripts/install.sh --local      # from a local build
+sudo ./scripts/install.sh --from DIR   # from quix, quixd and quixd.service in DIR
 sudo ./scripts/install.sh --uninstall
 ```
 
 Installs both binaries to `/usr/local/bin`, registers `quixd` as a systemd
 service, starts it, and makes whoever ran `sudo` the operator so day-to-day
-commands don't need root.
+commands don't need root. Add `--keep-operator` to leave an operator that is
+already set alone — `quix update` passes it.
 
 Prebuilt for **x86_64** and **aarch64**. Override with `INSTALL_DIR` or `REPO`.
 
@@ -111,12 +113,15 @@ Or from a clone, which is the only way to pass flags:
 ```powershell
 .\scripts\install.ps1              # from the latest release
 .\scripts\install.ps1 -Local       # from a local build
+.\scripts\install.ps1 -From DIR    # from the quix.exe and quixd.exe in DIR
 .\scripts\install.ps1 -Uninstall
 ```
 
 Installs to `Program Files\quix`, adds it to the machine PATH, and registers
 `quixd` as a LocalSystem service with automatic restart. State lives in
-`C:\ProgramData\quix`. Open a new terminal afterwards to pick up the PATH.
+`C:\ProgramData\quix`. Open a new terminal afterwards to pick up the PATH. Add
+`-KeepOperator` to leave an operator that is already set alone — `quix update`
+passes it. Re-running it over an existing install updates the service in place.
 
 Installing a service and editing the machine PATH both need Administrator, so
 the script re-runs itself elevated and you get a UAC prompt. Its output is
@@ -353,19 +358,31 @@ bare `systemctl start` followed by `quix status` can race.
 ### Updating
 
 ```bash
-quix version            # quix v0.1.0
-quix update --check     # what's available, installs nothing
-sudo quix update        # stop the service, swap both binaries, start it again
-sudo quix update --force   # reinstall the same version
+quix version              # quix v0.1.0
+quix update --check       # what's available, installs nothing
+sudo quix update          # install the latest release, exactly as the installer would
+sudo quix update --force  # reinstall the same version
 ```
 
-It downloads both binaries for your platform, verifies their SHA-256 against
-the release, and only then stops the service and swaps them — a failed download
-can't leave you half-updated. The old binaries are renamed aside rather than
-overwritten, since a running executable can't be replaced in place on Windows.
+If you're already on the latest version it says so and stops: nothing is
+downloaded and the service is not restarted.
 
-Updating needs write access to wherever quix is installed, so `sudo` on Linux
-and an elevated PowerShell on Windows.
+Otherwise it downloads the release archive for your platform — the same one the
+installer uses — verifies its SHA-256, and runs the installer inside it over
+your current installation. So an update also brings the service configuration
+up to date (the systemd unit; on Windows the service's environment, restart
+policy and state-directory permissions), and nothing needs re-running by hand
+when a release changes them. The operator you already have is kept.
+
+The binaries are renamed into place rather than overwritten, so the running
+daemon keeps its file until the single restart at the end, and an interrupted
+update never leaves a truncated binary. If anything fails before that restart,
+the service is started again rather than left down.
+
+`update` refuses on a machine where the `quixd` service isn't installed — that
+copy wasn't set up by the installer, so run the installer instead. It needs root
+on Linux; on Windows it asks for Administrator, but only once it knows there is
+something to install.
 
 ### Diagnosing
 
@@ -439,9 +456,10 @@ because a dialog in front of `quix status` teaches people to click through them:
 | Prompts | Why |
 |---|---|
 | `service start` \| `stop` \| `restart` \| `enable` \| `disable` | Service Control Manager writes |
-| `update` | Stops the service and replaces binaries in `Program Files` |
+| `update` | Only when there is something to install: the release installer writes `Program Files` and the service |
 
-`status`, `ping`, `version`, `service status` and `update --check` never prompt.
+`status`, `ping`, `version`, `service status` and `update --check` never prompt,
+and neither does `update` when you're already on the latest version.
 
 The membership commands — `create`, `invite`, `join`, `leave`, `hostname` — are
 the daemon's decision rather than the OS's, so they are **tried first and only

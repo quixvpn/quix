@@ -40,19 +40,7 @@ places (the unit and the Windows service's registry `Environment` key). A single
 `QUIX_STATE_DIR` that the individual paths derive from removes the whole class,
 with the per-file overrides kept for tests.
 
-### 3. `quix update` cannot fix service configuration
-
-It swaps binaries only. Service config — the systemd unit, the Windows
-registry environment — is written by the installer, so any release that changes
-one needs `install.sh` / `install.ps1` re-run rather than `quix update`. This
-has already bitten twice: a unit missing `QUIX_SETTINGS_PATH`, and again adding
-`QUIX_LOG_PATH`.
-
-`update` should at minimum compare the installed service config against the one
-in the release and say "re-run the installer" when they differ, rather than
-reporting success and leaving the daemon misconfigured.
-
-### 4. A clearer error when the TUN name is taken
+### 3. A clearer error when the TUN name is taken
 
 `Device or resource busy (os error 16)` is what you get when another quixd
 already holds the interface — the normal case for anyone who ran from a build
@@ -91,10 +79,14 @@ exactly the failure mode the update path can produce.
 
 ### Exercise `quix update` for real
 
-The API call and its error handling are verified, but the download, checksum
-verification, service stop and binary swap have never run against a real asset —
-there were no releases when it was written. Tag `v0.1.0` then `v0.1.1` fairly
-promptly just to prove the path, rather than finding out from a user.
+`update` hands off to the installer inside the release archive. The installer
+half — installing with `-From` over a running install, keeping the operator,
+swapping the running daemon's binary, starting a service a failure left stopped —
+has been run for real on Windows; `install.sh --from` still needs the same run
+on Linux. The download half — fetching and verifying the archive, extracting it,
+and on Windows the elevated relaunch passing the installer's output through —
+can only run against a published release that contains it. Once one exists:
+`quix update --force` on Windows, `sudo quix update --force` on Linux.
 
 ---
 

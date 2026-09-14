@@ -43,3 +43,7 @@ windows-sys = { version = "0.61", features = [
 
 [target."cfg(unix)".dependencies]
 uzers = "0.12.2"
+
+[target."cfg(unix)".dev-dependencies]
+# Sending ourselves SIGTERM, to test that it stops the daemon rather than killing it.
+libc = "0.2"

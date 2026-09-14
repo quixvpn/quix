@@ -11,6 +11,10 @@ Type=simple
 ExecStart=/usr/local/bin/quixd
 Restart=on-failure
 RestartSec=5s
+# Stopping is a graceful close to every peer and handing the zone back. If that
+# ever hangs, give up after 15s rather than systemd's default 90, so an update's
+# restart cannot stall for a minute and a half.
+TimeoutStopSec=15s
 
 # State lives outside any user's home: the daemon runs as root, and writing to
 # ~/.config leaves root-owned files in the installing user's directory.
