@@ -205,6 +205,8 @@ async fn dispatch(req: Request, state: &State) -> Response {
 			Err(e) => error(e),
 		},
 
+		Request::Kick { peer } => kick(state, &peer).await,
+
 		Request::SetOperator { user } => match authz::resolve_user(&user) {
 			Ok(uid) => match state.set_operator(user.clone(), uid).await {
 				Ok(()) => Response::OperatorSet { user, uid },
@@ -328,6 +330,54 @@ async fn set_hostname(state: &State, requested: &str, force: bool) -> anyhow::Re
 			state.adopt_hostname(wanted.clone()).await?;
 			Ok(wanted)
 		}
+	}
+}
+
+/// Removes a member, then makes sure it is heard: by the rest of the network
+/// through a roster push, and by the member itself so it leaves instead of
+/// dialing peers that now refuse it.
+async fn kick(state: &State, peer: &str) -> Response {
+	if !state.is_coordinator().await {
+		return Response::Error {
+			message: "only the coordinator can kick".to_string(),
+		};
+	}
+
+	let member = match state.kick(peer).await {
+		Ok(Ok(member)) => member,
+		Ok(Err(message)) => return Response::Error { message },
+		Err(e) => return error(e),
+	};
+	crate::info!("kicked member: {}", member.id);
+
+	// They are no longer in the roster, so the push skips them either way.
+	crate::admin::broadcast_roster(
+		state,
+		&member.id,
+		state.network_name().await,
+		state.roster().await,
+	);
+
+	// Best-effort, like `leave`: everyone else already refuses them, so all this
+	// buys is the kicked machine not believing it is still in the network.
+	let notified = match member.id.parse() {
+		Ok(id) => match crate::connect::notify_kicked(state.endpoint(), id).await {
+			Ok(()) => true,
+			Err(e) => {
+				crate::warn!("telling {} it was kicked failed: {e:#}", member.id);
+				false
+			}
+		},
+		Err(e) => {
+			crate::warn!("kicked member's id is unusable: {e}");
+			false
+		}
+	};
+
+	Response::Kicked {
+		name: crate::names::display(&member.id, member.hostname.as_deref()),
+		id: member.id,
+		notified,
 	}
 }
 

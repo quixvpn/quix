@@ -152,6 +152,7 @@ QUIX_SOCKET=/tmp/quix.sock ./target/debug/quix status
 | `quix invite --expires 30 min` | …valid for a window you choose, instead of the default 5 minutes |
 | `quix join <code>` | Join a network with an invite code |
 | `quix leave` | Leave the current network and drop every link |
+| `quix kick <peer>` | Remove a peer by hostname, fallback id or endpoint id (coordinator only) |
 | `quix hostname <name>` | Set this machine's name on the mesh |
 | `quix status` | This node, its addresses, and every peer's link state |
 | `quix status -v` | Adds per-hop packet counters and full endpoint ids |

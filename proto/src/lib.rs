@@ -35,6 +35,10 @@ pub enum Request {
 	Leave,
 	SetOperator { user: String },
 	SetHostname { hostname: String, force: bool },
+	/// Remove a peer from the network (coordinator only). `peer` is any name
+	/// `status` shows for it: hostname, fallback, either under the zone, or the
+	/// full endpoint id.
+	Kick { peer: String },
 }
 
 fn default_invite_ttl() -> u64 {
@@ -109,6 +113,9 @@ pub enum Response {
 	Left { network_name: Option<String>, coordinator_notified: bool },
 	OperatorSet { user: String, uid: u32 },
 	HostnameSet { hostname: String, requested: String },
+	/// A peer was removed. `notified` is whether it was told, as opposed to
+	/// finding out when the links it tries are refused.
+	Kicked { name: String, id: String, notified: bool },
 	/// The caller may not run this command as who they are. Distinct from
 	/// `Error` so a client can react to it — on Windows the CLI retries the
 	/// command elevated rather than making the user work out why it failed.

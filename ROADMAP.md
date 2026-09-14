@@ -150,12 +150,10 @@ several networks a peer could hold a different name in each, and the zone wants
 to be `name.network.quix`. The resolver already matches the zone as a suffix so
 the extra label can be added without reworking the query path.
 
-### Standby and member removal
+### Standby
 
 - `quix up` / `quix down` to drop the data plane while keeping peer connections
   warm, so coming back is instant and needs no root.
-- `quix kick <member>` for the coordinator, removing someone from the signed
-  roster so every other member disconnects them.
 
 ### macOS
 
@@ -171,6 +169,9 @@ Not bugs, and not currently planned to change:
 
 - **Coordinator must be online to admit new members.** Existing members reconnect
   without it; only joins need it. Fixed by the signed-roster item above.
+- **A kick only reaches members that are online.** One that was offline keeps
+  the old roster until it next links with the coordinator, and until then the
+  kicked peer can still link to it. Also fixed by signed rosters.
 - **IPv4 addresses can collide.** 24 bits of host space in `10.0.0.0/8` means a
   derived address could clash with something on a user's LAN. IPv6 is the primary
   family precisely because 120 bits makes this impossible there, and a peer stays

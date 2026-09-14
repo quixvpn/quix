@@ -239,9 +239,29 @@ impl State {
 		m.save()?;
 		drop(m);
 
-		self.refresh_routes().await;
+		// Links before routes. Rebuilding routes from the now-empty roster would
+		// close every link too, but telling peers they were removed rather than
+		// that we left.
 		self.peers.close_all().await;
+		self.refresh_routes().await;
 		Ok(name)
+	}
+
+	/// Coordinator side of a kick: removes the member `query` names and returns
+	/// who that was, or why nobody was removed.
+	pub async fn kick(&self, query: &str) -> Result<std::result::Result<Member, String>> {
+		let own_id = self.own_id().to_string();
+		let mut m = self.membership.lock().await;
+		let outcome = m.kick(query, &own_id);
+		if outcome.is_err() {
+			return Ok(outcome);
+		}
+		m.save()?;
+		drop(m);
+
+		// Closes our own link to them, not just the route.
+		self.refresh_routes().await;
+		Ok(outcome)
 	}
 
 	/// Coordinator side of a member leaving.

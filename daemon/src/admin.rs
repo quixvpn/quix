@@ -33,6 +33,9 @@ pub enum AdminRequest {
 		network_name: Option<String>,
 		members: Vec<Member>,
 	},
+	/// Coordinator → member: you have been removed from the network. The member
+	/// leaves locally, as if it had run `quix leave` itself.
+	Kicked,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,6 +97,31 @@ impl AdminHandler {
 				network_name,
 				members,
 			} => self.roster(network_name, members, requester).await,
+			AdminRequest::Kicked => self.kicked(requester).await,
+		}
+	}
+
+	/// Being removed by the coordinator.
+	async fn kicked(&self, requester: String) -> AdminResponse {
+		// Only the coordinator may say so; otherwise any peer that can reach us
+		// could knock us off the network.
+		if self.state.coordinator_id().await.as_deref() != Some(requester.as_str()) {
+			return AdminResponse::Error {
+				message: "only the coordinator can remove a member".to_string(),
+			};
+		}
+
+		match self.state.leave().await {
+			Ok(network_name) => {
+				crate::warn!(
+					"removed from {} by the coordinator",
+					network_name.as_deref().unwrap_or("the network")
+				);
+				AdminResponse::Ack
+			}
+			Err(e) => AdminResponse::Error {
+				message: e.to_string(),
+			},
 		}
 	}
 

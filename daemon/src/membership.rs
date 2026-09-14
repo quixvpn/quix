@@ -479,6 +479,47 @@ impl Membership {
 		before != self.members.len()
 	}
 
+	/// Finds the member a human means, by any name `status` shows for it: the
+	/// full endpoint id, the hostname, or the fallback, bare or under this
+	/// network's zone.
+	///
+	/// A hostname can never be shaped like another peer's fallback, so the two
+	/// cannot point at different members.
+	pub fn find_member(&self, query: &str) -> Option<&Member> {
+		let mut name = query.trim().trim_end_matches('.').to_ascii_lowercase();
+		if let Some(network) = &self.network_name {
+			let zone = format!(".{}.{}", names::network_label(network), crate::dns::ZONE);
+			if let Some(bare) = name.strip_suffix(&zone) {
+				name = bare.to_string();
+			}
+		}
+		if name.is_empty() {
+			return None;
+		}
+
+		self.members.iter().find(|m| {
+			m.id == name || m.hostname.as_deref() == Some(name.as_str()) || names::fallback(&m.id) == name
+		})
+	}
+
+	/// Coordinator side of removing someone who did not ask to go. Returns who
+	/// was removed, so the caller can tell them and name them to the operator.
+	///
+	/// Their hostname stays reserved, for the reason given on `remove_member`.
+	pub fn kick(&mut self, query: &str, own_id: &str) -> Result<Member, String> {
+		let member = self
+			.find_member(query)
+			.cloned()
+			.ok_or_else(|| format!("{} is not a member of this network", query.trim()))?;
+
+		if member.id == own_id {
+			return Err("that is this node — to take it out of the network, use `quix leave`".to_string());
+		}
+
+		self.remove_member(&member.id);
+		Ok(member)
+	}
+
 	/// The roster as endpoint ids, skipping any entry that doesn't parse.
 	pub fn member_ids(&self) -> Vec<EndpointId> {
 		self.members.iter().filter_map(|m| m.id.parse().ok()).collect()
@@ -857,6 +898,101 @@ mod tests {
 		let written = serde_json::to_string(&m).unwrap();
 		assert!(written.contains(r#"{"id":"aa"}"#), "got {written}");
 		assert!(written.contains(r#"{"id":"bb","hostname":"nas"}"#), "got {written}");
+	}
+
+	/// A coordinator (1) with a named peer (2) and an unnamed one (3), which is
+	/// every shape a kick target can take.
+	fn network_to_kick_from() -> Membership {
+		let mut m = Membership::default();
+		m.create("net".into(), id(1), Some("win".into()));
+		m.members.push(Member::new(id(2)));
+		m.claim_hostname(&id(2), "nas", false).unwrap();
+		m.members.push(Member::new(id(3)));
+		m
+	}
+
+	#[test]
+	fn a_peer_is_found_by_every_name_status_shows_for_it() {
+		let m = network_to_kick_from();
+		let fallback = names::fallback(&id(3));
+
+		for query in [
+			id(3),
+			fallback.clone(),
+			format!("{fallback}.net.quix"),
+			format!("{fallback}.net.quix."),
+			fallback.to_uppercase(),
+		] {
+			assert_eq!(m.find_member(&query).map(|m| m.id.as_str()), Some(id(3).as_str()), "{query}");
+		}
+		for query in ["nas", "NAS", "nas.net.quix"] {
+			assert_eq!(m.find_member(query).map(|m| m.id.as_str()), Some(id(2).as_str()), "{query}");
+		}
+	}
+
+	#[test]
+	fn a_named_peer_still_answers_to_its_fallback() {
+		let m = network_to_kick_from();
+		assert_eq!(m.find_member(&names::fallback(&id(2))).map(|m| m.id.as_str()), Some(id(2).as_str()));
+	}
+
+	#[test]
+	fn a_name_nobody_holds_finds_nobody() {
+		let m = network_to_kick_from();
+		for query in ["", "printer", "nas.other.quix", "12345678"] {
+			assert!(m.find_member(query).is_none(), "{query:?}");
+		}
+	}
+
+	#[test]
+	fn a_departed_members_name_finds_nobody() {
+		// The binding outlives the member, but there is no one left to target.
+		let mut m = network_to_kick_from();
+		m.remove_member(&id(2));
+		assert!(m.find_member("nas").is_none());
+	}
+
+	#[test]
+	fn kicking_removes_the_member_and_says_who_it_was() {
+		let mut m = network_to_kick_from();
+
+		let kicked = m.kick("nas", &id(1)).expect("nas is a member");
+
+		assert_eq!(kicked.id, id(2));
+		assert_eq!(kicked.hostname.as_deref(), Some("nas"));
+		assert!(!m.is_member(&id(2)));
+		assert!(m.is_member(&id(3)), "nobody else goes with it");
+	}
+
+	#[test]
+	fn a_kicked_members_name_stays_reserved() {
+		// Same rule as leaving: members only ever hear of a removal from the
+		// coordinator, so freeing the name would let one evict a peer to take it.
+		let mut m = network_to_kick_from();
+		m.kick("nas", &id(1)).unwrap();
+		m.members.push(Member::new(id(4)));
+
+		assert_eq!(m.claim_hostname(&id(4), "nas", false), Ok("nas-1".to_string()));
+	}
+
+	#[test]
+	fn the_coordinator_cannot_kick_itself() {
+		let mut m = network_to_kick_from();
+
+		let refused = m.kick("win", &id(1)).unwrap_err();
+
+		assert!(refused.contains("leave"), "{refused}");
+		assert!(m.is_member(&id(1)));
+	}
+
+	#[test]
+	fn kicking_someone_unknown_is_refused_by_name() {
+		let mut m = network_to_kick_from();
+
+		let refused = m.kick("printer", &id(1)).unwrap_err();
+
+		assert!(refused.contains("printer"), "{refused}");
+		assert_eq!(m.members.len(), 3);
 	}
 
 	#[test]

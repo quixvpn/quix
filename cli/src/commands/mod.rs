@@ -3,6 +3,7 @@ mod create;
 mod hostname;
 mod invite;
 mod join;
+mod kick;
 mod leave;
 mod operator;
 mod ping;
@@ -53,6 +54,8 @@ pub enum Command {
 	Join(join::JoinArgs),
 	/// Leave the current network
 	Leave(leave::LeaveArgs),
+	/// Remove a peer from the network (coordinator only)
+	Kick(kick::KickArgs),
 	/// Set this machine's hostname on the mesh
 	Hostname(hostname::HostnameArgs),
 	/// Send a test message to a peer
@@ -98,6 +101,7 @@ fn needs_elevation(command: &Command) -> bool {
 		| Command::Invite(_)
 		| Command::Join(_)
 		| Command::Leave(_)
+		| Command::Kick(_)
 		| Command::Hostname(_) => false,
 		// Not supported on Windows at all, so a prompt would buy a UAC dialog
 		// and then an error. Rejected up front instead, in `run`.
@@ -150,6 +154,7 @@ pub async fn run() -> anyhow::Result<()> {
 		Command::Invite(args) => invite::run(args).await,
 		Command::Join(args) => join::run(args).await,
 		Command::Leave(args) => leave::run(args).await,
+		Command::Kick(args) => kick::run(args).await,
 		Command::Hostname(args) => hostname::run(args).await,
 		Command::Ping(args) => ping::run(args).await,
 		Command::Status(args) => status::run(args).await,
@@ -214,6 +219,7 @@ mod tests {
 		assert!(!elevates(&["quix", "join", "somecode"]));
 		assert!(!elevates(&["quix", "leave"]));
 		assert!(!elevates(&["quix", "hostname", "nas"]));
+		assert!(!elevates(&["quix", "kick", "nas"]));
 	}
 
 	#[test]

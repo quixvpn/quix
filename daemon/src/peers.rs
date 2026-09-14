@@ -12,6 +12,9 @@ use crate::tun::virtual_addrs;
 /// Close code sent to peers when we leave their network.
 const CLOSE_LEFT: u32 = 3;
 
+/// Close code sent to a peer that is no longer in the roster.
+const CLOSE_REMOVED: u32 = 4;
+
 /// The mesh's forwarding state: which overlay address belongs to which peer,
 /// and which of those peers we currently hold a live connection to.
 ///
@@ -34,17 +37,31 @@ struct Inner {
 }
 
 impl Peers {
-	/// Replaces the routing table with one derived from a membership roster.
+	/// Replaces the routing table with one derived from a membership roster,
+	/// and closes the link to anyone no longer in it.
+	///
 	/// Every member's addresses fall out of its public key, so this needs no
 	/// coordination and survives restarts.
 	pub async fn set_routes(&self, members: impl IntoIterator<Item = EndpointId>) {
+		let members: HashSet<EndpointId> = members.into_iter().collect();
+
 		let mut routes = HashMap::new();
-		for id in members {
+		for id in &members {
 			let (v4, v6) = virtual_addrs(id.as_bytes());
-			routes.insert(IpAddr::V4(v4), id);
-			routes.insert(IpAddr::V6(v6), id);
+			routes.insert(IpAddr::V4(v4), *id);
+			routes.insert(IpAddr::V6(v6), *id);
 		}
-		self.inner.write().await.routes = routes;
+
+		let mut inner = self.inner.write().await;
+		inner.routes = routes;
+
+		// A kicked peer will not hang up on its own, and its read loop would go
+		// on delivering its packets into the TUN for as long as the link lives.
+		for id in departed(inner.links.keys().copied(), &members) {
+			if let Some(conn) = inner.links.remove(&id) {
+				conn.close(CLOSE_REMOVED.into(), b"removed from the network");
+			}
+		}
 	}
 
 	/// Every address we expect to carry, for the system routing table.
@@ -126,6 +143,14 @@ impl Peers {
 	}
 }
 
+/// The linked peers that are not in `members`.
+fn departed(
+	linked: impl IntoIterator<Item = EndpointId>,
+	members: &HashSet<EndpointId>,
+) -> Vec<EndpointId> {
+	linked.into_iter().filter(|id| !members.contains(id)).collect()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PeerRow {
 	pub id: EndpointId,
@@ -141,6 +166,25 @@ mod tests {
 
 	fn id(n: u8) -> EndpointId {
 		iroh::SecretKey::from_bytes(&[n; 32]).public()
+	}
+
+	#[test]
+	fn links_to_peers_gone_from_the_roster_are_the_ones_dropped() {
+		// A kicked peer will not hang up on its own, so a link that outlives its
+		// membership keeps pouring packets into the TUN unless we close it.
+		let members: HashSet<EndpointId> = [id(1), id(3)].into();
+
+		let mut dropped = departed([id(1), id(2), id(3), id(4)], &members);
+		dropped.sort();
+
+		let mut expected = vec![id(2), id(4)];
+		expected.sort();
+		assert_eq!(dropped, expected);
+	}
+
+	#[test]
+	fn an_empty_roster_drops_every_link() {
+		assert_eq!(departed([id(1)], &HashSet::new()), vec![id(1)]);
 	}
 
 	#[tokio::test]

@@ -114,7 +114,8 @@ fn is_read_only(req: &Request) -> bool {
 		| Request::Join { .. }
 		| Request::Leave
 		| Request::SetHostname { .. }
-		| Request::SetOperator { .. } => false,
+		| Request::SetOperator { .. }
+		| Request::Kick { .. } => false,
 	}
 }
 
@@ -326,6 +327,18 @@ mod tests {
 		// S-1-5-21-1-2-3-1001 and S-1-5-21-1-2-3-10011 are different accounts.
 		let longer = format!("{OPERATOR_SID}1");
 		assert!(check(&mutating(), &windows(false), &operator_sid(&longer)).is_err());
+	}
+
+	#[test]
+	fn kicking_a_peer_needs_authorization() {
+		// It changes who else belongs to the network, which is more than any
+		// local user should be able to do just by reaching the socket.
+		let kick = Request::Kick {
+			peer: "nas".to_string(),
+		};
+		assert!(check(&kick, &Caller::Uid(4242), &operator_uid(OPERATOR)).is_err());
+		assert!(check(&kick, &windows(false), &nobody()).is_err());
+		assert!(check(&kick, &Caller::Uid(OPERATOR), &operator_uid(OPERATOR)).is_ok());
 	}
 
 	#[test]

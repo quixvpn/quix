@@ -142,6 +142,27 @@ pub async fn notify_leave(endpoint: &Endpoint, coordinator: EndpointId) -> Resul
 	}
 }
 
+/// How long the coordinator spends telling a kicked peer. The kick has already
+/// happened by then, and a peer being kicked is often one that is offline.
+const KICK_NOTICE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Coordinator → member: tell a peer it has been removed, so it leaves rather
+/// than going on dialing members that now refuse it.
+pub async fn notify_kicked(endpoint: &Endpoint, member: EndpointId) -> Result<()> {
+	let response = tokio::time::timeout(
+		KICK_NOTICE_TIMEOUT,
+		admin_call(endpoint, member, AdminRequest::Kicked),
+	)
+	.await
+	.context("timed out")??;
+
+	match response {
+		AdminResponse::Ack => Ok(()),
+		AdminResponse::Error { message } => anyhow::bail!(message),
+		other => anyhow::bail!("unexpected response to kick: {other:?}"),
+	}
+}
+
 /// Coordinator → member: publish an updated roster.
 pub async fn push_roster(
 	endpoint: &Endpoint,
