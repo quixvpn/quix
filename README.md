@@ -283,9 +283,9 @@ resolver to register with at all cannot be waited out, so that reads as what it
 is, with the line that fixes it:
 
 ```text
-dns -----  .quix names do not resolve system-wide
-           systemd-resolved is not running; enable it with `sudo systemctl enable --now systemd-resolved`
-           until then they resolve only by asking 127.0.0.1:5354 directly
+DNS ---------  .quix names do not resolve system-wide
+               systemd-resolved is not running; enable it with `sudo systemctl enable --now systemd-resolved`
+               until then they resolve only by asking 127.0.0.1:5354 directly
 ```
 
 The retry carries on underneath that too, so enabling the resolver is noticed

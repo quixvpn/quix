@@ -8,6 +8,16 @@ pub const VERSION: &str = env!("QUIX_VERSION");
 /// The same version written the way the release tag is, e.g. `v0.1.3`.
 pub const VERSION_TAG: &str = env!("QUIX_VERSION_TAG");
 
+/// The DNS suffix a mesh answers under, and the whole of what the daemon claims
+/// from the system resolver.
+///
+/// Shared rather than spelled out on both sides: the CLI prints names in it and
+/// the daemon registers it, and the two disagreeing would mean telling someone a
+/// name that resolves nowhere. A network's own zone is a label in front of this
+/// — `homelab.quix` — which only the daemon can build, since only it knows how a
+/// network name becomes a label.
+pub const ZONE: &str = "quix";
+
 /// How long an invite stays redeemable when `--expires` is not given.
 ///
 /// Short on purpose: a code is meant to be handed over and used, and the window
@@ -150,7 +160,18 @@ pub enum Response {
 		/// minted it, so they know how long they have to pass it on.
 		expires_at: String,
 	},
-	Joined { network_name: Option<String>, hostname: Option<String> },
+	Joined {
+		network_name: Option<String>,
+		hostname: Option<String>,
+		/// The suffix the new member's names resolve under, e.g. `homelab.quix`,
+		/// built the same way `Status` builds it. Sent so the CLI can name what
+		/// was just joined without deriving a label of its own.
+		///
+		/// Defaulted for a daemon that predates it, where empty means "not told"
+		/// rather than "no zone".
+		#[serde(default)]
+		zone: String,
+	},
 	Left { network_name: Option<String>, coordinator_notified: bool },
 	OperatorSet { user: String, uid: u32 },
 	HostnameSet { hostname: String, requested: String },

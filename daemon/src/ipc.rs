@@ -120,11 +120,7 @@ async fn dispatch(req: Request, state: &State) -> Response {
 		Request::Status => {
 			let hostnames = state.hostnames().await;
 			let own_hostname = state.hostname().await;
-			let zone = state
-				.network_name()
-				.await
-				.map(|n| format!("{}.{}", crate::names::network_label(&n), crate::dns::ZONE))
-				.unwrap_or_else(|| crate::dns::ZONE.to_string());
+			let zone = zone(state).await;
 			let peers = state
 				.peers()
 				.snapshot()
@@ -257,9 +253,12 @@ async fn dispatch(req: Request, state: &State) -> Response {
 					)
 					.await
 				{
+					// Read after `set_joined`, or it would still describe the
+					// network we were in before this one.
 					Ok(()) => Response::Joined {
 						network_name: name,
 						hostname: assigned,
+						zone: zone(state).await,
 					},
 					Err(e) => error(e),
 				}
@@ -267,6 +266,20 @@ async fn dispatch(req: Request, state: &State) -> Response {
 			Err(e) => error(e),
 		},
 	}
+}
+
+/// The suffix this node's names resolve under: the network's label in front of
+/// the zone, or the bare zone when there is no network yet.
+///
+/// One definition for every response that mentions it. `join` and `status`
+/// disagreeing would be worse than either being wrong on its own — one of them
+/// would be telling someone a name the other says is something else.
+async fn zone(state: &State) -> String {
+	state
+		.network_name()
+		.await
+		.map(|n| format!("{}.{}", crate::names::network_label(&n), crate::dns::ZONE))
+		.unwrap_or_else(|| crate::dns::ZONE.to_string())
 }
 
 /// Validates the hostname before it reaches the roster, so an unusable label is

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use proto::{DnsRegistration, PeerStatus, Request, Response, Traffic};
+use proto::{DnsRegistration, PeerStatus, Request, Response, Traffic, ZONE};
 
 use super::client::send;
 
@@ -30,22 +30,22 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 		} => {
 			let role = if coordinator { "coordinator" } else { "member" };
 			match network {
-				Some(name) => println!("network  {name}  ({role})"),
-				None => println!("network  none — run `quix create <name>` or `quix join <code>`"),
+				Some(name) => println!("Network - {name}  ({role})"),
+				None => println!("Network - none. Run `quix create <name>` or `quix join <code>`"),
 			}
 			let unnamed = if named { "" } else { "  (no hostname set)" };
-			println!("name ----  {name}.{zone}{unnamed}");
-			println!("IPv4 ----  {v4}");
-			println!("IPv6 ----  {v6}");
-			println!("id ------  {endpoint_id}");
+			println!("Hostname ----  {name}.{zone}{unnamed}");
+			println!("IPv4 --------  {v4}");
+			println!("IPv6 --------  {v6}");
+			println!("ID ----------  {endpoint_id}");
 			// Never behind -v: broken name resolution with nothing on screen to
 			// explain it is exactly the failure this line exists for.
-			if let Some(line) = dns_line(&dns, &zone) {
+			if let Some(line) = dns_line(&dns) {
 				println!("{line}");
 			}
 
 			if peers.is_empty() {
-				println!("\nno peers yet");
+				println!("\nNo peers yet!");
 			} else {
 				let linked = peers.iter().filter(|p| p.linked).count();
 				println!("\npeers  {linked}/{} linked", peers.len());
@@ -58,7 +58,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 			// point an existing name at a different key, so it is never hidden
 			// behind -v.
 			if !conflicts.is_empty() {
-				println!("\nname conflicts");
+				println!("\nName conflicts!");
 				for conflict in &conflicts {
 					println!("  {conflict}");
 				}
@@ -97,11 +97,15 @@ fn print_peer(peer: &PeerStatus, zone: &str, verbose: bool) {
 ///
 /// Continuation lines are indented to where the other labels put their values,
 /// so a two-line answer still reads as one row.
-fn dns_line(dns: &DnsRegistration, zone: &str) -> Option<String> {
+///
+/// Speaks of the whole zone rather than this node's `network.quix`: what is or
+/// is not registered with the system resolver is all of `.quix`, and naming the
+/// narrower suffix here would suggest names on other networks were unaffected.
+fn dns_line(dns: &DnsRegistration) -> Option<String> {
 	match dns {
 		DnsRegistration::Registered => None,
 		DnsRegistration::Retrying { fallback } => Some(format!(
-			"dns -----  not registered with the system resolver yet, retrying — \
+			"DNS ---------  not registered with the system resolver yet, retrying — \
 			 names resolve only via {fallback} meanwhile"
 		)),
 		// Nothing here changes on its own, so this says what to do about it
@@ -110,7 +114,7 @@ fn dns_line(dns: &DnsRegistration, zone: &str) -> Option<String> {
 			// The state, then the thing to do about it, then where names still
 			// work. A row apiece: run together they are one line of well over a
 			// hundred characters, and the actionable half is the half that wraps.
-			let mut line = format!("dns -----  .{zone} names do not resolve system-wide");
+			let mut line = format!("DNS ---------  .{ZONE} names do not resolve system-wide");
 			match remedy {
 				Some(remedy) => line.push_str(&format!("\n{INDENT}{remedy}")),
 				None => line.push_str(&format!("\n{INDENT}the daemon log says why")),
@@ -123,15 +127,15 @@ fn dns_line(dns: &DnsRegistration, zone: &str) -> Option<String> {
 			Some(line)
 		}
 		DnsRegistration::Unknown => Some(format!(
-			"dns -----  this daemon does not report whether .{zone} names resolve system-wide\n\
-			 {INDENT}it predates the check — `quix update` to find out"
+			"DNS ---------  this daemon does not report whether .{ZONE} names resolve \
+			 system-wide\n{INDENT}it predates the check — `quix update` to find out"
 		)),
 	}
 }
 
-/// Lines the continuation of a two-line row up with the values above it:
-/// `name ----  ` and every other label is this wide.
-const INDENT: &str = "           ";
+/// Lines the continuation of a multi-line row up with the values above it:
+/// `Hostname ----  ` and every other label is this wide.
+const INDENT: &str = "               ";
 
 fn print_traffic(traffic: &Traffic) {
 	// Ordered as a packet travels, so the first zero is the failing hop.
@@ -171,15 +175,14 @@ mod tests {
 
 	#[test]
 	fn nothing_is_said_when_names_resolve_normally() {
-		assert_eq!(dns_line(&DnsRegistration::Registered, "quix"), None);
+		assert_eq!(dns_line(&DnsRegistration::Registered), None);
 	}
 
 	#[test]
 	fn a_registration_being_retried_says_so_and_where_names_resolve_meanwhile() {
-		let line = dns_line(
-			&DnsRegistration::Retrying { fallback: "127.0.0.1:5354".to_string() },
-			"quix",
-		)
+		let line = dns_line(&DnsRegistration::Retrying {
+			fallback: "127.0.0.1:5354".to_string(),
+		})
 		.expect("a broken resolver must be visible");
 
 		assert!(line.contains("retrying"), "{line}");
@@ -188,7 +191,10 @@ mod tests {
 
 	#[test]
 	fn a_registration_nobody_is_retrying_does_not_claim_to_be() {
-		let line = dns_line(&DnsRegistration::Unavailable { fallback: None, remedy: None }, "quix")
+		let line = dns_line(&DnsRegistration::Unavailable {
+			fallback: None,
+			remedy: None,
+		})
 		.expect("a broken resolver must be visible");
 
 		assert!(!line.contains("retrying"), "{line}");
@@ -202,13 +208,10 @@ mod tests {
 		// journal while `status` said nothing at all.
 		let remedy = "systemd-resolved is not running; enable it with \
 		              `sudo systemctl enable --now systemd-resolved`";
-		let line = dns_line(
-			&DnsRegistration::Unavailable {
-				fallback: Some("127.0.0.1:5354".to_string()),
-				remedy: Some(remedy.to_string()),
-			},
-			"quix",
-		)
+		let line = dns_line(&DnsRegistration::Unavailable {
+			fallback: Some("127.0.0.1:5354".to_string()),
+			remedy: Some(remedy.to_string()),
+		})
 		.expect("a broken resolver must be visible");
 
 		assert!(line.contains("systemctl enable --now systemd-resolved"), "{line}");
@@ -247,7 +250,7 @@ mod tests {
 
 	#[test]
 	fn a_daemon_that_does_not_report_it_says_so_and_names_the_way_out() {
-		let line = dns_line(&DnsRegistration::Unknown, "quix").expect("silence must be visible");
+		let line = dns_line(&DnsRegistration::Unknown).expect("silence must be visible");
 
 		assert!(!line.contains("retrying"), "nothing is known to be happening: {line}");
 		assert!(line.contains("update"), "says how to get an answer: {line}");

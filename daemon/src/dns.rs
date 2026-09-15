@@ -24,8 +24,9 @@ use tokio::net::UdpSocket;
 use crate::names;
 use crate::state::State;
 
-/// The suffix this resolver is authoritative for.
-pub const ZONE: &str = "quix";
+/// The suffix this resolver is authoritative for. Shared with the CLI, which
+/// prints names in it.
+pub const ZONE: &str = proto::ZONE;
 
 /// The testing endpoint, reachable regardless of whether OS registration
 /// worked. Never port 53, so it cannot collide with the system resolver.
