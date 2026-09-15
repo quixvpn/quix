@@ -1,4 +1,5 @@
 mod admin;
+mod args;
 mod authz;
 mod connect;
 mod dns;
@@ -47,9 +48,29 @@ fn main() -> Result<()> {
 	// Started by the Service Control Manager? Then it owns our lifecycle. The
 	// dispatcher only connects inside a real service process, so a failure here
 	// means we were launched from a terminal instead.
+	//
+	// Asked before the command line is read, deliberately: the SCM passes the
+	// service's own start parameters, which are not ours to interpret, and a
+	// service that refused to start over one would be a poor trade for a
+	// stricter terminal.
 	#[cfg(windows)]
 	if service::run() {
 		return Ok(());
+	}
+
+	// Anything but a bare invocation is answered here and nothing is started.
+	match args::parse(std::env::args().skip(1))? {
+		// Not through `crate::info!`: this is a question asked at a terminal,
+		// and the answer belongs on stdout rather than in the daemon's log.
+		args::Invocation::Version => {
+			println!("quixd {}", proto::VERSION_TAG);
+			return Ok(());
+		}
+		args::Invocation::Help => {
+			println!("{}", args::USAGE);
+			return Ok(());
+		}
+		args::Invocation::Run => {}
 	}
 
 	runtime()?.block_on(async {

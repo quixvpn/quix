@@ -84,17 +84,36 @@ pub struct Traffic {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum DnsRegistration {
-	/// The system resolver sends `.quix` queries here. Also what a status from a
-	/// daemon that predates this field reads as, so an older daemon never looks
-	/// broken to a newer CLI.
-	#[default]
+	/// The system resolver sends `.quix` queries here.
 	Registered,
-	/// Not registered yet, and the daemon keeps trying. Meanwhile names resolve
-	/// only by asking `fallback` directly.
+	/// Not registered yet, and the daemon keeps trying, because what failed can
+	/// plausibly go differently on another attempt — an interface still
+	/// settling, say. Meanwhile names resolve only by asking `fallback`
+	/// directly.
 	Retrying { fallback: String },
-	/// Not registered and not being retried: the resolver has no address the
-	/// system could be pointed at. The daemon's log says why.
-	Unavailable,
+	/// Not registered, and no further attempt will change that until somebody
+	/// acts on this machine — most of all, a machine with no system resolver to
+	/// register with at all.
+	///
+	/// `remedy` is that action in one line, when the platform has one to name;
+	/// without it the daemon's log is the only explanation. Both fields default,
+	/// so a status from a daemon that sends neither still reads as this state
+	/// rather than failing to parse.
+	Unavailable {
+		#[serde(default)]
+		fallback: Option<String>,
+		#[serde(default)]
+		remedy: Option<String>,
+	},
+	/// The daemon did not say, which only happens reading a status from one that
+	/// predates the field.
+	///
+	/// The default for exactly that reason, and deliberately not `Registered`:
+	/// silence is not the same as working, and reading it as working is what let
+	/// a machine where `.quix` never resolved at all report nothing wrong. No
+	/// daemon ever sends this.
+	#[default]
+	Unknown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

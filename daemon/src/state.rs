@@ -63,8 +63,13 @@ impl State {
 			routes: Routes::new(crate::tun::interface_name()),
 			stats: Stats::default(),
 			conflicts: Arc::new(Mutex::new(Vec::new())),
-			// Nothing has been tried yet, so nothing is registered.
-			dns: Arc::new(Mutex::new(DnsRegistration::Unavailable)),
+			// Nothing has been tried yet, so nothing is registered. Never
+			// `Unknown`: that one means a daemon too old to have an opinion, and
+			// this daemon is about to have one either way.
+			dns: Arc::new(Mutex::new(DnsRegistration::Unavailable {
+				fallback: None,
+				remedy: None,
+			})),
 			dial_tx,
 		})
 	}

@@ -273,8 +273,24 @@ and outlast the process, so the daemon removes any rule of its own at startup
 before adding a fresh one, and removes it again on shutdown.
 
 Neither needs privileges beyond what the TUN device already requires. If
-registration fails — no systemd-resolved, for instance — the daemon logs a
-warning and carries on; only OS-wide resolution is lost.
+registration fails the daemon logs a warning and carries on; only OS-wide
+resolution is lost.
+
+`quix status` says which of those happened, and the distinction matters. A
+failure another attempt could survive — an interface still settling — reads as
+`retrying`, and the daemon keeps trying with backoff. A machine with no system
+resolver to register with at all cannot be waited out, so that reads as what it
+is, with the line that fixes it:
+
+```text
+dns -----  .quix names do not resolve system-wide
+           systemd-resolved is not running; enable it with `sudo systemctl enable --now systemd-resolved`
+           until then they resolve only by asking 127.0.0.1:5354 directly
+```
+
+The retry carries on underneath that too, so enabling the resolver is noticed
+within the minute rather than at the next restart. [Known gaps](#known-gaps) has
+why this is the one most people meet.
 
 Before handing an address to the system resolver the daemon queries it, and
 registers only an address that answers. Binding one proves nothing on its own:
@@ -520,6 +536,29 @@ Being explicit about what isn't built yet:
 - **The roster is unsigned.** Members trust the coordinator by identity alone,
   and it must be online to admit anyone. No DHT-published signed record yet, so
   admission doesn't survive the coordinator being away.
+- **Arch-based distros need systemd-resolved enabled by hand.** Arch and its
+  derivatives — EndeavourOS, Manjaro — ship systemd-resolved *installed but not
+  enabled*, and nothing turns it on for you: NetworkManager and dhcpcd write
+  `/etc/resolv.conf` themselves, so ordinary DNS works and the unit's absence is
+  invisible until something wants a private zone. Ubuntu and Fedora have it
+  active out of the box, which is why the same daemon resolves names on one
+  machine and not on the machine next to it.
+
+  Until it is enabled, `.quix` names do not resolve system-wide at all — `ping`,
+  `ssh` and a browser all fail with *Name or service not known* while the mesh
+  itself works perfectly and IP addresses ping fine. `quix status` names this,
+  and the fix is one command:
+
+  ```bash
+  sudo systemctl enable --now systemd-resolved
+  ```
+
+  Confirmed on a stock Arch VM against a working Fedora peer. This is a distro
+  configuration gap rather than a quix bug, and quix does not enable system
+  services on its own, but it is the single most likely reason names do not
+  resolve on Linux, so it is listed here rather than left to a log line. A host
+  without systemd-resolved has no other resolution path: quix deliberately does
+  not manage `/etc/hosts` or install an NSS module.
 - **macOS has no resolver integration.** Linux and Windows register the zone;
   macOS would need its own mechanism.
 - **No `quix up` / `down`,** and no way to pause without stopping the daemon.

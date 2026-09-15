@@ -40,7 +40,7 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 			println!("id ------  {endpoint_id}");
 			// Never behind -v: broken name resolution with nothing on screen to
 			// explain it is exactly the failure this line exists for.
-			if let Some(line) = dns_line(&dns) {
+			if let Some(line) = dns_line(&dns, &zone) {
 				println!("{line}");
 			}
 
@@ -94,18 +94,44 @@ fn print_peer(peer: &PeerStatus, zone: &str, verbose: bool) {
 }
 
 /// Says why names do not resolve through the system, or nothing when they do.
-fn dns_line(dns: &DnsRegistration) -> Option<String> {
+///
+/// Continuation lines are indented to where the other labels put their values,
+/// so a two-line answer still reads as one row.
+fn dns_line(dns: &DnsRegistration, zone: &str) -> Option<String> {
 	match dns {
 		DnsRegistration::Registered => None,
 		DnsRegistration::Retrying { fallback } => Some(format!(
 			"dns -----  not registered with the system resolver yet, retrying — \
 			 names resolve only via {fallback} meanwhile"
 		)),
-		DnsRegistration::Unavailable => Some(
-			"dns -----  not registered with the system resolver — the daemon log says why".to_string(),
-		),
+		// Nothing here changes on its own, so this says what to do about it
+		// rather than what is being waited for.
+		DnsRegistration::Unavailable { fallback, remedy } => {
+			// The state, then the thing to do about it, then where names still
+			// work. A row apiece: run together they are one line of well over a
+			// hundred characters, and the actionable half is the half that wraps.
+			let mut line = format!("dns -----  .{zone} names do not resolve system-wide");
+			match remedy {
+				Some(remedy) => line.push_str(&format!("\n{INDENT}{remedy}")),
+				None => line.push_str(&format!("\n{INDENT}the daemon log says why")),
+			}
+			if let Some(fallback) = fallback {
+				line.push_str(&format!(
+					"\n{INDENT}until then they resolve only by asking {fallback} directly"
+				));
+			}
+			Some(line)
+		}
+		DnsRegistration::Unknown => Some(format!(
+			"dns -----  this daemon does not report whether .{zone} names resolve system-wide\n\
+			 {INDENT}it predates the check — `quix update` to find out"
+		)),
 	}
 }
+
+/// Lines the continuation of a two-line row up with the values above it:
+/// `name ----  ` and every other label is this wide.
+const INDENT: &str = "           ";
 
 fn print_traffic(traffic: &Traffic) {
 	// Ordered as a packet travels, so the first zero is the failing hop.
@@ -145,14 +171,15 @@ mod tests {
 
 	#[test]
 	fn nothing_is_said_when_names_resolve_normally() {
-		assert_eq!(dns_line(&DnsRegistration::Registered), None);
+		assert_eq!(dns_line(&DnsRegistration::Registered, "quix"), None);
 	}
 
 	#[test]
 	fn a_registration_being_retried_says_so_and_where_names_resolve_meanwhile() {
-		let line = dns_line(&DnsRegistration::Retrying {
-			fallback: "127.0.0.1:5354".to_string(),
-		})
+		let line = dns_line(
+			&DnsRegistration::Retrying { fallback: "127.0.0.1:5354".to_string() },
+			"quix",
+		)
 		.expect("a broken resolver must be visible");
 
 		assert!(line.contains("retrying"), "{line}");
@@ -161,16 +188,40 @@ mod tests {
 
 	#[test]
 	fn a_registration_nobody_is_retrying_does_not_claim_to_be() {
-		let line = dns_line(&DnsRegistration::Unavailable).expect("a broken resolver must be visible");
+		let line = dns_line(&DnsRegistration::Unavailable { fallback: None, remedy: None }, "quix")
+		.expect("a broken resolver must be visible");
 
 		assert!(!line.contains("retrying"), "{line}");
 		assert!(line.contains("log"), "points somewhere to find out why: {line}");
 	}
 
 	#[test]
-	fn a_daemon_from_before_the_field_reads_as_registered() {
-		// A newer CLI talking to an older daemon must not warn about a problem the
-		// daemon never reported.
+	fn a_permanent_failure_with_a_remedy_puts_the_remedy_on_screen() {
+		// The whole point of the state: the one line that would have explained an
+		// Arch box where systemd-resolved was never enabled was buried in the
+		// journal while `status` said nothing at all.
+		let remedy = "systemd-resolved is not running; enable it with \
+		              `sudo systemctl enable --now systemd-resolved`";
+		let line = dns_line(
+			&DnsRegistration::Unavailable {
+				fallback: Some("127.0.0.1:5354".to_string()),
+				remedy: Some(remedy.to_string()),
+			},
+			"quix",
+		)
+		.expect("a broken resolver must be visible");
+
+		assert!(line.contains("systemctl enable --now systemd-resolved"), "{line}");
+		assert!(line.contains("127.0.0.1:5354"), "says where names still resolve: {line}");
+		assert!(!line.contains("retrying"), "nothing to wait for: {line}");
+	}
+
+	#[test]
+	fn a_daemon_from_before_the_field_is_not_read_as_registered() {
+		// It used to be, which is how a machine that had never registered the zone
+		// at all produced a status with nothing on it to say so. Absent is not the
+		// same as working, and the one thing the CLI knows here is that it does not
+		// know.
 		let status = Response::Status {
 			endpoint_id: String::new(),
 			name: String::new(),
@@ -183,14 +234,46 @@ mod tests {
 			zone: "quix".to_string(),
 			traffic: Traffic::default(),
 			conflicts: vec![],
-			dns: DnsRegistration::Unavailable,
+			dns: DnsRegistration::Registered,
 		};
 		let mut json = serde_json::to_value(&status).unwrap();
 		json["Status"].as_object_mut().unwrap().remove("dns");
 
 		match serde_json::from_value::<Response>(json).unwrap() {
-			Response::Status { dns, .. } => assert_eq!(dns, DnsRegistration::Registered),
+			Response::Status { dns, .. } => assert_eq!(dns, DnsRegistration::Unknown),
 			other => panic!("expected a status, got {other:?}"),
 		}
+	}
+
+	#[test]
+	fn a_daemon_that_does_not_report_it_says_so_and_names_the_way_out() {
+		let line = dns_line(&DnsRegistration::Unknown, "quix").expect("silence must be visible");
+
+		assert!(!line.contains("retrying"), "nothing is known to be happening: {line}");
+		assert!(line.contains("update"), "says how to get an answer: {line}");
+	}
+
+	#[test]
+	fn a_cli_from_before_the_remedy_still_reads_a_status_carrying_one() {
+		// `Unavailable` was a unit variant before it carried anything. Both
+		// binaries are replaced together by the installer, but a CLI that predates
+		// the extra keys must still read the state rather than fail the whole
+		// status — which is what decided these being fields rather than a new
+		// variant, whose tag an older CLI could not match at all.
+		#[derive(Debug, PartialEq, serde::Deserialize)]
+		#[serde(tag = "state", rename_all = "snake_case")]
+		enum Old {
+			Registered,
+			Retrying { fallback: String },
+			Unavailable,
+		}
+
+		let json = serde_json::to_string(&DnsRegistration::Unavailable {
+			fallback: Some("127.0.0.1:5354".to_string()),
+			remedy: Some("enable systemd-resolved".to_string()),
+		})
+		.unwrap();
+
+		assert_eq!(serde_json::from_str::<Old>(&json).unwrap(), Old::Unavailable);
 	}
 }
