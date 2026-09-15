@@ -14,10 +14,37 @@ use tokio::process::Command;
 
 use crate::dns::ZONE;
 
+#[derive(Debug)]
+pub enum Error {
+	/// There is no system resolver here to register with: not installed, or
+	/// installed and not running. Nothing we do changes that.
+	///
+	/// Unix only. NRPT is part of Windows, so there is nothing there that a
+	/// person could have left switched off.
+	#[cfg_attr(not(unix), allow(dead_code))]
+	NoResolver {
+		source: anyhow::Error,
+		/// What the user can do about it, in one line, when this platform has
+		/// an answer. `None` where quix has no integration to offer at all.
+		remedy: Option<&'static str>,
+	},
+	/// Failed this time. An interface that is still coming up does this, so
+	/// another attempt is worth making.
+	Transient(anyhow::Error),
+}
+
+impl std::fmt::Display for Error {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Error::NoResolver { source, .. } | Error::Transient(source) => write!(f, "{source:#}"),
+		}
+	}
+}
+
 /// Points the system resolver at us for `.quix`, and nothing else.
 ///
 /// `iface` is the mesh interface; `server` is where we answer.
-pub async fn register(iface: &str, server: SocketAddr) -> Result<()> {
+pub async fn register(iface: &str, server: SocketAddr) -> Result<(), Error> {
 	platform::register(iface, server).await
 }
 
@@ -32,10 +59,28 @@ pub async fn deregister(iface: &str) -> Result<()> {
 mod platform {
 	use super::*;
 
-	pub async fn register(iface: &str, server: SocketAddr) -> Result<()> {
-		available()
-			.await
-			.context("systemd-resolved is not available")?;
+	/// What to do about a missing systemd-resolved, in the one line `status` has
+	/// room for.
+	///
+	/// Linux only. The same module is compiled on macOS, where `resolvectl` is
+	/// missing for a reason no user can act on: there is no integration there to
+	/// enable, which is a limitation rather than a misconfiguration.
+	#[cfg(target_os = "linux")]
+	const REMEDY: Option<&'static str> = Some(
+		"systemd-resolved is not running; enable it with \
+		 `sudo systemctl enable --now systemd-resolved`",
+	);
+	#[cfg(not(target_os = "linux"))]
+	const REMEDY: Option<&'static str> = None;
+
+	pub async fn register(iface: &str, server: SocketAddr) -> Result<(), Error> {
+		// The one permanent failure here, and the common one: a distro that ships
+		// systemd-resolved without enabling it. Everything past this point is a
+		// command that could go differently on another attempt.
+		available().await.map_err(|source| Error::NoResolver {
+			source: source.context("systemd-resolved is not available"),
+			remedy: REMEDY,
+		})?;
 
 		// resolved takes a port, so we can answer on an unprivileged one.
 		// `SocketAddr`'s own formatting is already what it expects: bare for
@@ -45,13 +90,15 @@ mod platform {
 		// does this, which means a killed daemon leaves nothing stale behind.
 		run(&["dns", iface, &server.to_string()])
 			.await
-			.context("pointing the link at our resolver")?;
+			.context("pointing the link at our resolver")
+			.map_err(Error::Transient)?;
 
 		// The `~` prefix makes it a *routing* domain: queries for this zone
 		// come to us, and nothing else about the system's DNS changes.
 		run(&["domain", iface, &format!("~{ZONE}")])
 			.await
-			.context("claiming the zone")?;
+			.context("claiming the zone")
+			.map_err(Error::Transient)?;
 
 		Ok(())
 	}
@@ -94,18 +141,23 @@ mod platform {
 	/// Tagged so we only ever remove rules we created.
 	const COMMENT: &str = "quix mesh resolver";
 
-	pub async fn register(_iface: &str, server: SocketAddr) -> Result<()> {
+	pub async fn register(_iface: &str, server: SocketAddr) -> Result<(), Error> {
 		// NRPT rules live in the registry and outlast the process, so clear any
 		// left by a previous run before adding this one.
 		let _ = deregister(_iface).await;
 
 		// NRPT carries no port, which is why the Windows listener is on 53.
+		//
+		// Nothing here is ever `NoResolver`: NRPT is part of Windows, so there is
+		// no equivalent of a resolver that was never switched on. A failure is
+		// something about this attempt, and another one may well work.
 		powershell(&format!(
 			"Add-DnsClientNrptRule -Namespace '.{ZONE}' -NameServers '{}' -Comment '{COMMENT}'",
 			server.ip()
 		))
 		.await
 		.context("adding the NRPT rule")
+		.map_err(Error::Transient)
 	}
 
 	pub async fn deregister(_iface: &str) -> Result<()> {

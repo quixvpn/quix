@@ -17,6 +17,12 @@ interprocess = { version = "2.4.4", features = ["tokio"] }
 sha2 = "0.11.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset"] }
 
+[dev-dependencies]
+# Standing in for an older CLI's own types, to check that one can still read a
+# status from a newer daemon. Only the tests need it: everything the CLI itself
+# deserializes is defined in `proto`.
+serde = { workspace = true, features = ["derive"] }
+
 [target."cfg(unix)".dependencies]
 # geteuid, for refusing an update that could not install before downloading it.
 libc = "0.2"

@@ -2778,6 +2778,7 @@ dependencies = [
  "libc",
  "proto",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",

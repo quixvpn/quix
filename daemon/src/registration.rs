@@ -52,7 +52,7 @@ enum Failure {
 	/// None of the mesh addresses answered the reachability probe.
 	Unreachable,
 	/// An address answered, but the system resolver could not be pointed at it.
-	Register(anyhow::Error),
+	Register(resolv::Error),
 }
 
 /// How a background retry run ended.
@@ -81,22 +81,28 @@ pub async fn start(state: State, iface: String, candidates: Vec<SocketAddr>) -> 
 			 system resolver\n\
 			 names still resolve via {fallback}"
 		);
-		state.set_dns(DnsRegistration::Unavailable).await;
+		state
+			.set_dns(DnsRegistration::Unavailable {
+				fallback: Some(fallback),
+				remedy: None,
+			})
+			.await;
 		return Registration { iface, attempted, retrying: None };
 	}
 
 	// Not cancellable, and needs not be: shutdown is only listened for once
 	// startup is done, so this always finishes before a stop is handled.
-	match attempt(&iface, &candidates, &attempted).await {
+	let failure = match attempt(&iface, &candidates, &attempted).await {
 		Ok(server) => {
 			crate::info!("registered *.{ZONE} with the system resolver via {server}");
 			state.set_dns(DnsRegistration::Registered).await;
 			return Registration { iface, attempted, retrying: None };
 		}
-		Err(failure) => report_first(&failure, &candidates, &fallback),
-	}
+		Err(failure) => failure,
+	};
+	report_first(&failure, &candidates, &fallback);
 
-	state.set_dns(DnsRegistration::Retrying { fallback }).await;
+	state.set_dns(reported(&failure, &fallback)).await;
 
 	let (stop, stop_rx) = watch::channel(false);
 	let retrying = tokio::spawn({
@@ -187,6 +193,33 @@ async fn attempt(
 	Ok(server)
 }
 
+/// What `status` should say after an attempt has failed.
+///
+/// A system resolver that is not there is not a failure that waiting fixes, so
+/// it is reported as what it is — with the one line saying what to do about it —
+/// rather than as a retry in progress. Reporting the two alike is what let a
+/// machine that had never registered the zone at all look like one that was two
+/// seconds from succeeding.
+///
+/// The retry keeps running underneath either way. Someone enabling the resolver
+/// is exactly what it is there to notice, and a daemon that only found out on
+/// its next restart is how this stayed invisible in the first place — so the
+/// state can still go to `Registered` on its own, it just no longer claims to be
+/// on its way there.
+fn reported(failure: &Failure, fallback: &str) -> DnsRegistration {
+	match failure {
+		Failure::Register(resolv::Error::NoResolver { remedy, .. }) => {
+			DnsRegistration::Unavailable {
+				fallback: Some(fallback.to_string()),
+				remedy: remedy.map(str::to_string),
+			}
+		}
+		Failure::Unreachable | Failure::Register(resolv::Error::Transient(_)) => {
+			DnsRegistration::Retrying { fallback: fallback.to_string() }
+		}
+	}
+}
+
 /// The full explanation of why registration failed, logged once.
 fn report_first(failure: &Failure, candidates: &[SocketAddr], fallback: &str) {
 	match failure {
@@ -203,8 +236,17 @@ fn report_first(failure: &Failure, candidates: &[SocketAddr], fallback: &str) {
 				dns::ZONE_PORT
 			);
 		}
-		Failure::Register(e) => crate::warn!(
-			"warning: could not register *.{ZONE} with the system resolver: {e:#}\n\
+		// Named in full rather than left to the reader: this is the one failure
+		// here that nobody can wait out, and the line that says so was the line
+		// missing while an Arch box quietly resolved no names at all.
+		Failure::Register(error @ resolv::Error::NoResolver { remedy, .. }) => crate::warn!(
+			"warning: could not register *.{ZONE} with the system resolver: {error}\n\
+			 {}\
+			 names resolve via {fallback} until then; the daemon keeps watching in case that changes",
+			remedy.map(|remedy| format!("{remedy}\n")).unwrap_or_default()
+		),
+		Failure::Register(error) => crate::warn!(
+			"warning: could not register *.{ZONE} with the system resolver: {error}\n\
 			 retrying in the background; until then names resolve via {fallback}"
 		),
 	}
@@ -325,6 +367,70 @@ async fn wait_for_stop(task: JoinHandle<()>, stop: watch::Sender<bool>, limit: D
 mod tests {
 	use super::*;
 	use std::cell::{Cell, RefCell};
+
+	const FALLBACK: &str = "127.0.0.1:5354";
+
+	/// The remedy the Linux path carries. Only the routing matters here, not the
+	/// wording, so this stands in for it.
+	const REMEDY: &str = "enable systemd-resolved";
+
+	fn no_resolver(remedy: Option<&'static str>) -> Failure {
+		Failure::Register(resolv::Error::NoResolver {
+			source: anyhow::anyhow!("resolvectl is missing or systemd-resolved is not running"),
+			remedy,
+		})
+	}
+
+	#[test]
+	fn a_machine_with_no_system_resolver_is_not_reported_as_retrying() {
+		// The failure this whole split exists for. An Arch box that ships
+		// systemd-resolved without enabling it used to report exactly what an
+		// interface still settling reports, so the one case that needed a person
+		// to do something looked like the one that fixes itself.
+		let reported = reported(&no_resolver(Some(REMEDY)), FALLBACK);
+
+		assert_eq!(
+			reported,
+			DnsRegistration::Unavailable {
+				fallback: Some(FALLBACK.to_string()),
+				remedy: Some(REMEDY.to_string()),
+			}
+		);
+	}
+
+	#[test]
+	fn a_platform_with_no_remedy_to_offer_still_reports_the_state() {
+		// macOS: `resolvectl` is missing for a reason nobody can act on. The
+		// state is still the truth, there is just nothing to tell them to do.
+		assert_eq!(
+			reported(&no_resolver(None), FALLBACK),
+			DnsRegistration::Unavailable {
+				fallback: Some(FALLBACK.to_string()),
+				remedy: None,
+			}
+		);
+	}
+
+	#[test]
+	fn a_failure_another_attempt_could_survive_is_still_reported_as_retrying() {
+		let transient = Failure::Register(resolv::Error::Transient(anyhow::anyhow!(
+			"resolvectl domain quix ~quix: Unknown interface"
+		)));
+
+		assert_eq!(
+			reported(&transient, FALLBACK),
+			DnsRegistration::Retrying { fallback: FALLBACK.to_string() }
+		);
+	}
+
+	#[test]
+	fn an_address_nothing_answered_on_is_reported_as_retrying() {
+		// A just-created interface does this and then stops doing it.
+		assert_eq!(
+			reported(&Failure::Unreachable, FALLBACK),
+			DnsRegistration::Retrying { fallback: FALLBACK.to_string() }
+		);
+	}
 
 	#[test]
 	fn retries_back_off_by_doubling_from_two_seconds() {
