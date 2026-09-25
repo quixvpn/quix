@@ -162,6 +162,9 @@ QUIX_SOCKET=/tmp/quix.sock ./target/debug/quix status
 | `quix status` | This node, its addresses, and every peer's link state |
 | `quix status -v` | Adds per-hop packet counters and full endpoint ids |
 | `quix ping <peer-id>` | Probe a peer's link and report RTT |
+| `quix file send <path> <peer>` | Offer a file to a peer, and send it once they accept |
+| `quix file list` | Offers waiting here; pick one to accept or reject |
+| `quix file accept <id>` \| `reject <id>` | Answer an offer by id, without asking |
 | `quix set-operator <user>` | Let a local user run commands without sudo (Unix only) |
 | `quix service status` | Whether the daemon runs now, and whether it starts at boot |
 | `quix service start` \| `stop` \| `restart` | Control the daemon now |
@@ -353,6 +356,83 @@ resolvectl domain quix      # should list ~quix
 resolvectl query nas.homelab.quix
 ```
 
+### Sending files
+
+`quix file` sends a file straight to another member, wormhole style. Nothing is
+uploaded anywhere first: the sender offers the file and waits, and once the
+receiver accepts, the bytes go from one machine to the other through both
+daemons. Both ends have to be there at the same time.
+
+On the sending machine:
+
+```console
+$ quix file send report.pdf nas
+Waiting for nas to accept report.pdf (2.4 MiB)... press Ctrl+C to cancel
+expires in 9m 58s
+```
+
+The peer can be named any way `status` would show it: its hostname,
+`name.network.quix`, its 8-character fallback id, or its overlay address. The
+offer waits 10 minutes for an answer by default, and the command stays running
+for that whole time. Choose another window with `--expires`, up to 24 hours:
+
+```bash
+quix file send backup.tar nas --expires 30 min   # min, hours or days
+```
+
+On the receiving machine, `quix file list` shows what is waiting. At a
+terminal, pick an offer with the arrow keys and answer `Y` or `n`; `Esc` or `q`
+leaves:
+
+```console
+$ quix file list
+Accept report.pdf (2.4 MiB) from laptop? [Y/n]
+receiving report.pdf (2.4 MiB) from laptop...
+Downloaded 2.4 MiB in 1.3s
+saved /home/you/Downloads/report.pdf
+```
+
+Anywhere else — piped, or in a script — it prints a tab-separated table with
+the offers waiting here and those this node sent, and exits. Answer an offer by
+its id without being asked:
+
+```bash
+quix file list | cut -f1          # the ids
+quix file accept 3fa9c01d         # save it
+quix file accept 3fa9c01d --here  # into the current directory instead
+quix file reject 3fa9c01d
+```
+
+Received files go to your Downloads folder (or your home directory, if the
+platform names no Downloads folder), and `--here` saves into the directory you
+ran the command from. An existing file is never overwritten: a second
+`photo.jpg` lands as `photo (1).jpg`.
+
+What to expect:
+
+- **Only regular files.** Directories are refused; archive one first. Only the
+  file's name crosses the network, never the path it was sent from.
+- **Checked before it moves.** The receiver refuses a file that won't fit on
+  disk, or whose name it cannot save, before the sender sends a byte.
+- **Verified before it lands.** The file is written under a hidden
+  `.quix-*.part` name and only renamed into place once its size and BLAKE3 hash
+  match what the sender read. Anything that stops a transfer short — a failure,
+  either side pressing Ctrl+C, a daemon restarting — leaves nothing behind on
+  either end.
+- **Not resumable.** A transfer that breaks off is sent again from the start.
+- **Your files, your permissions.** The files are opened by the CLI, as the
+  user who typed the command, never by the daemon. You cannot send a file you
+  cannot read, receive into a directory you cannot write to, and whatever
+  arrives belongs to you. On Windows that is why file commands are never retried
+  elevated.
+- **Members only.** Offers go to and come from current members; removing a peer
+  ends its offers and any transfer under way. Each peer may have at most 20
+  offers waiting on a node at once.
+
+`send` exits with a code a script can branch on: `0` once the receiver confirms
+the file is saved, `3` if they rejected it, `4` if nobody answered in time, `130`
+if you cancelled it, and `1` for anything else.
+
 ### Controlling the daemon
 
 ```bash
@@ -428,6 +508,10 @@ connection itself, rather than by the socket's file permissions:
 - **Mutating** commands (`create`, `invite`, `join`, `leave`, `hostname`,
   `set-operator`) need root, or the configured operator, or — on Windows — an
   elevated caller.
+- **File** commands need the same, `file list` included. Offers are made to and
+  by the machine rather than a user, so an unauthorized account could otherwise
+  see another user's incoming file names, take their files, or send as this
+  node.
 
 The identity is the kernel's answer about the live connection, not anything the
 client sends, so it cannot be forged. On Unix that is `SO_PEERCRED`. On Windows
