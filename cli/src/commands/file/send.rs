@@ -115,15 +115,34 @@ pub async fn run(args: SendArgs) -> Result<()> {
 	let interrupted = super::interrupted();
 	tokio::pin!(interrupted);
 
+	// At a terminal the time left counts down on a line of its own below this
+	// one, short enough never to wrap, since a wrapped line cannot be redrawn
+	// in place. Anywhere else it is said once, here.
+	let mut countdown = format::Countdown::new(expires_in_secs);
+	let expiry = match countdown.enabled() {
+		true => String::new(),
+		false => format!(", expires in {}", format::duration(expires_in_secs)),
+	};
 	println!(
-		"waiting for {to} to accept {name} ({}), expires in {}... press Ctrl+C to cancel",
+		"Waiting for {to} to accept {name} ({}){expiry}... press Ctrl+C to cancel",
 		format::size(size),
-		format::duration(expires_in_secs)
 	);
 
-	let answer = tokio::select! {
-		answer = transfer.frames.next() => answer,
-		_ = &mut interrupted => return Err(Ended::error(Ended::CANCELLED, "cancelled; the offer was withdrawn")),
+	let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+	tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	let answer = loop {
+		tokio::select! {
+			answer = transfer.frames.next() => break Some(answer),
+			_ = &mut interrupted => break None,
+			_ = tick.tick(), if countdown.enabled() => countdown.show(),
+		}
+	};
+	countdown.done();
+	let Some(answer) = answer else {
+		return Err(Ended::error(
+			Ended::CANCELLED,
+			"cancelled; the offer was withdrawn",
+		));
 	};
 	match answer {
 		Ok(Frame::Control(json)) => match Frame::parse::<FileEvent>(&json)? {
@@ -163,7 +182,7 @@ pub async fn run(args: SendArgs) -> Result<()> {
 	};
 	match outcome {
 		Ok(Frame::Control(json)) if Frame::parse::<FileEvent>(&json)? == FileEvent::Delivered => {
-			println!("delivered {name} to {to}");
+			println!("Delivered {name} to {to}");
 			Ok(())
 		}
 		Ok(Frame::Error(message)) => anyhow::bail!("send failed: {message}"),
