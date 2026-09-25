@@ -479,13 +479,24 @@ impl Membership {
 		before != self.members.len()
 	}
 
-	/// Finds the member a human means, by any name `status` shows for it: the
-	/// full endpoint id, the hostname, or the fallback, bare or under this
-	/// network's zone.
+	/// Finds the member a human means, by anything `status` shows for it: the
+	/// full endpoint id, the hostname, the fallback, either of those two bare or
+	/// under this network's zone, or one of its overlay addresses.
 	///
-	/// A hostname can never be shaped like another peer's fallback, so the two
-	/// cannot point at different members.
+	/// A hostname can never be shaped like another peer's fallback, and an
+	/// address is derived from the key, so none of these can point at different
+	/// members.
 	pub fn find_member(&self, query: &str) -> Option<&Member> {
+		// Parsed rather than compared as text: `200:0:…` and `200::…` are the
+		// same address, and the one someone types may not be the one we print.
+		if let Ok(addr) = query.trim().parse::<std::net::IpAddr>() {
+			return self.members.iter().find(|m| {
+				let Ok(key) = m.id.parse::<EndpointId>() else { return false };
+				let (v4, v6) = crate::tun::virtual_addrs(key.as_bytes());
+				addr == v4 || addr == v6
+			});
+		}
+
 		let mut name = query.trim().trim_end_matches('.').to_ascii_lowercase();
 		if let Some(network) = &self.network_name {
 			let zone = format!(".{}.{}", names::network_label(network), crate::dns::ZONE);
@@ -928,6 +939,36 @@ mod tests {
 		for query in ["nas", "NAS", "nas.net.quix"] {
 			assert_eq!(m.find_member(query).map(|m| m.id.as_str()), Some(id(2).as_str()), "{query}");
 		}
+	}
+
+	#[test]
+	fn a_peer_is_found_by_either_of_its_overlay_addresses() {
+		let m = network_to_kick_from();
+		let key: EndpointId = id(2).parse().unwrap();
+		let (v4, v6) = crate::tun::virtual_addrs(key.as_bytes());
+
+		for query in [v4.to_string(), v6.to_string(), format!(" {v4} ")] {
+			assert_eq!(m.find_member(&query).map(|m| m.id.as_str()), Some(id(2).as_str()), "{query}");
+		}
+		// IPv6 has many spellings of one address; any of them is that peer.
+		let expanded = v6.segments().map(|s| format!("{s:04x}")).join(":");
+		assert_eq!(m.find_member(&expanded).map(|m| m.id.as_str()), Some(id(2).as_str()), "{expanded}");
+	}
+
+	#[test]
+	fn an_address_nobody_in_the_roster_owns_finds_nobody() {
+		let mut m = network_to_kick_from();
+		let outsider: EndpointId = id(9).parse().unwrap();
+		let (v4, v6) = crate::tun::virtual_addrs(outsider.as_bytes());
+		for query in [v4.to_string(), v6.to_string(), "10.0.0.1".to_string(), "::1".to_string()] {
+			assert!(m.find_member(&query).is_none(), "{query}");
+		}
+
+		// Nor does a member's address once they are gone.
+		let departed: EndpointId = id(3).parse().unwrap();
+		let (v4, _) = crate::tun::virtual_addrs(departed.as_bytes());
+		m.remove_member(&id(3));
+		assert!(m.find_member(&v4.to_string()).is_none());
 	}
 
 	#[test]

@@ -106,6 +106,10 @@ impl Caller {
 
 /// Commands that only read state are open to any local user; everything else
 /// changes what this machine belongs to and needs authorization.
+///
+/// File commands are all authorized, listing included: offers are made to and
+/// by the machine rather than a user, so an unauthorized account could see
+/// another user's incoming file names, take their files, or send as this node.
 fn is_read_only(req: &Request) -> bool {
 	match req {
 		Request::Status | Request::Ping { .. } => true,
@@ -115,7 +119,11 @@ fn is_read_only(req: &Request) -> bool {
 		| Request::Leave
 		| Request::SetHostname { .. }
 		| Request::SetOperator { .. }
-		| Request::Kick { .. } => false,
+		| Request::Kick { .. }
+		| Request::FileSend { .. }
+		| Request::FileList
+		| Request::FileAccept { .. }
+		| Request::FileReject { .. } => false,
 	}
 }
 
@@ -339,6 +347,36 @@ mod tests {
 		assert!(check(&kick, &Caller::Uid(4242), &operator_uid(OPERATOR)).is_err());
 		assert!(check(&kick, &windows(false), &nobody()).is_err());
 		assert!(check(&kick, &Caller::Uid(OPERATOR), &operator_uid(OPERATOR)).is_ok());
+	}
+
+	#[test]
+	fn every_file_command_needs_authorization() {
+		// Offers are made to and by the machine, not a user. Any local account
+		// able to list, take or send them could read another user's incoming
+		// files or send as this node — so even listing is the operator's.
+		let commands = [
+			Request::FileSend {
+				name: "a.txt".to_string(),
+				size: 1,
+				target: "nas".to_string(),
+				ttl_secs: proto::DEFAULT_FILE_TTL,
+			},
+			Request::FileList,
+			Request::FileAccept {
+				id: "0000aaaa".to_string(),
+			},
+			Request::FileReject {
+				id: "0000aaaa".to_string(),
+			},
+		];
+		for req in &commands {
+			assert!(check(req, &Caller::Uid(4242), &operator_uid(OPERATOR)).is_err(), "{req:?}");
+			assert!(check(req, &Caller::Unknown, &nobody()).is_err(), "{req:?}");
+			assert!(check(req, &windows(false), &nobody()).is_err(), "{req:?}");
+			assert!(check(req, &Caller::Uid(OPERATOR), &operator_uid(OPERATOR)).is_ok(), "{req:?}");
+			assert!(check(req, &windows(false), &operator_sid(OPERATOR_SID)).is_ok(), "{req:?}");
+			assert!(check(req, &Caller::Uid(0), &nobody()).is_ok(), "{req:?}");
+		}
 	}
 
 	#[test]

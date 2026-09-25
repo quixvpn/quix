@@ -9,6 +9,7 @@ use tun_rs::AsyncDevice;
 
 use proto::DnsRegistration;
 
+use crate::files::Files;
 use crate::membership::{Member, Membership};
 use crate::peers::Peers;
 use crate::routes::Routes;
@@ -29,6 +30,7 @@ pub struct State {
 	/// How `.quix` registration with the system resolver stands, for `status`.
 	dns: Arc<Mutex<DnsRegistration>>,
 	dial_tx: mpsc::Sender<EndpointId>,
+	files: Files,
 }
 
 impl fmt::Debug for State {
@@ -44,7 +46,6 @@ impl State {
 		dial_tx: mpsc::Sender<EndpointId>,
 	) -> Result<Self> {
 		Ok(Self {
-			endpoint,
 			tun: Arc::new(tun),
 			membership: Arc::new(Mutex::new(Membership::load()?)),
 			// Not fatal, unlike the roster. Settings only name the operator, and
@@ -71,6 +72,8 @@ impl State {
 				remedy: None,
 			})),
 			dial_tx,
+			files: Files::new(endpoint.clone()),
+			endpoint,
 		})
 	}
 
@@ -94,11 +97,31 @@ impl State {
 		&self.stats
 	}
 
+	pub fn files(&self) -> &Files {
+		&self.files
+	}
+
 	/// Rebuilds the routing table from the roster and asks the dialer to reach
 	/// anyone we're not linked to yet. Called after every membership change so
 	/// a new member starts carrying traffic without waiting for a tick.
 	pub async fn refresh_routes(&self) {
-		let members = self.membership.lock().await.member_ids();
+		let (members, named) = {
+			let m = self.membership.lock().await;
+			let named: Vec<(EndpointId, String)> = m
+				.roster()
+				.into_iter()
+				.filter_map(|member| {
+					let id = member.id.parse().ok()?;
+					let shown = crate::names::display(&member.id, member.hostname.as_deref());
+					Some((id, shown))
+				})
+				.filter(|(id, _)| *id != self.own_id())
+				.collect();
+			(m.member_ids(), named)
+		};
+		// File offers are gated by the same roster as the data plane, and end
+		// with it: an offer from someone just removed goes the moment they do.
+		self.files.set_roster(named);
 		self.peers
 			.set_routes(members.into_iter().filter(|id| *id != self.own_id()))
 			.await;
@@ -310,6 +333,23 @@ impl State {
 		settings.operator_uid = Some(uid);
 		settings.operator_name = Some(name);
 		settings.save()
+	}
+
+	/// The member a human means by `query` — any name `status` shows, or an
+	/// overlay address — as its key and the name to call it by. Never this node.
+	pub async fn find_peer(&self, query: &str) -> std::result::Result<(EndpointId, String), String> {
+		let m = self.membership.lock().await;
+		let member = m
+			.find_member(query)
+			.ok_or_else(|| format!("{} is not a member of this network", query.trim()))?;
+		if member.id == self.own_id().to_string() {
+			return Err("that is this node".to_string());
+		}
+		let id = member
+			.id
+			.parse()
+			.map_err(|_| format!("{} has an unusable id in the roster", member.id))?;
+		Ok((id, crate::names::display(&member.id, member.hostname.as_deref())))
 	}
 
 	pub async fn is_member(&self, id: &str) -> bool {

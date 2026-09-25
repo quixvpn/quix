@@ -44,6 +44,11 @@ windows-sys = { version = "0.61", features = [
 [target."cfg(unix)".dependencies]
 uzers = "0.12.2"
 
+[dev-dependencies]
+# The file tests hash what they send the way the CLI does, to check the hash
+# arrives untouched.
+blake3 = "1.8"
+
 [target."cfg(unix)".dev-dependencies]
 # Sending ourselves SIGTERM, to test that it stops the daemon rather than killing it.
 libc = "0.2"

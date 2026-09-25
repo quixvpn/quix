@@ -1,5 +1,7 @@
 mod client;
 mod create;
+mod expiry;
+pub mod file;
 mod hostname;
 mod invite;
 mod join;
@@ -58,6 +60,8 @@ pub enum Command {
 	Kick(kick::KickArgs),
 	/// Set this machine's hostname on the mesh
 	Hostname(hostname::HostnameArgs),
+	/// Send files to other members, and receive theirs
+	File(file::FileArgs),
 	/// Send a test message to a peer
 	Ping(ping::PingArgs),
 	/// Show the daemon's status
@@ -109,6 +113,10 @@ fn needs_elevation(command: &Command) -> bool {
 		// Not supported on Windows at all, so a prompt would buy a UAC dialog
 		// and then an error. Rejected up front instead, in `run`.
 		Command::SetOperator(_) => false,
+		// Never, not even when the daemon refuses: these read and write the
+		// user's own files, and elevated they would create files owned by
+		// Administrators instead. See `client::send_as_caller`.
+		Command::File(_) => false,
 		Command::Status(_) | Command::Ping(_) | Command::Version => false,
 	}
 }
@@ -123,6 +131,7 @@ fn needs_elevation(command: &Command) -> bool {
 fn check_args(command: &Command) -> anyhow::Result<()> {
 	match command {
 		Command::Invite(args) => invite::ttl_secs(args).map(|_| ()).map_err(|e| anyhow::anyhow!(e)),
+		Command::File(args) => file::check_args(args).map_err(|e| anyhow::anyhow!(e)),
 		_ => Ok(()),
 	}
 }
@@ -159,6 +168,7 @@ pub async fn run() -> anyhow::Result<()> {
 		Command::Leave(args) => leave::run(args).await,
 		Command::Kick(args) => kick::run(args).await,
 		Command::Hostname(args) => hostname::run(args).await,
+		Command::File(args) => file::run(args).await,
 		Command::Ping(args) => ping::run(args).await,
 		Command::Status(args) => status::run(args).await,
 		Command::SetOperator(args) => operator::run(args).await,
@@ -235,6 +245,17 @@ mod tests {
 		] {
 			assert!(!elevates(&args), "{args:?}");
 		}
+	}
+
+	#[test]
+	fn file_commands_never_prompt() {
+		// They run as the user who typed them, so what they save belongs to that
+		// user rather than to Administrators.
+		assert!(!elevates(&["quix", "file", "send", "a.txt", "nas"]));
+		assert!(!elevates(&["quix", "file", "list"]));
+		assert!(!elevates(&["quix", "file", "list", "--here"]));
+		assert!(!elevates(&["quix", "file", "accept", "0000aaaa"]));
+		assert!(!elevates(&["quix", "file", "reject", "0000aaaa"]));
 	}
 
 	#[test]
