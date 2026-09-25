@@ -100,14 +100,21 @@ pub async fn accept(id: &str, dir: &Path) -> Result<PathBuf> {
 
 	println!("receiving {name} ({}) from {from}...", format::size(size));
 
+	let started = std::time::Instant::now();
 	let interrupted = super::interrupted();
 	tokio::pin!(interrupted);
-	tokio::select! {
-		saved = receive(&mut transfer.frames, &mut transfer.out, part, dir, &name, size) => saved,
+	let saved = tokio::select! {
+		saved = receive(&mut transfer.frames, &mut transfer.out, part, dir, &name, size) => saved?,
 		// Dropping the transfer drops the partial file with it, and hanging up
 		// tells the sender.
-		_ = &mut interrupted => Err(Ended::error(Ended::CANCELLED, "cancelled; nothing was saved")),
-	}
+		_ = &mut interrupted => return Err(Ended::error(Ended::CANCELLED, "cancelled; nothing was saved")),
+	};
+	println!(
+		"Downloaded {} in {}",
+		format::size(size),
+		format::elapsed(started.elapsed())
+	);
+	Ok(saved)
 }
 
 fn check_name(name: &str) -> Result<()> {

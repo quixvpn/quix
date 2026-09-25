@@ -68,6 +68,60 @@ impl Progress {
 	}
 }
 
+/// How long a transfer took: `40ms` under a second, `3.2s` under a minute,
+/// where the tenths still matter, and like [`duration`] past it.
+pub fn elapsed(took: std::time::Duration) -> String {
+	match took.as_secs() {
+		0 => format!("{}ms", took.as_millis()),
+		1..60 => format!("{:.1}s", took.as_secs_f64()),
+		secs => duration(secs),
+	}
+}
+
+/// The time left on an offer, redrawn in place on stderr every second under
+/// the same terms as [`Progress`]: only at a terminal.
+pub struct Countdown {
+	deadline: std::time::Instant,
+	shown: bool,
+	enabled: bool,
+}
+
+impl Countdown {
+	pub fn new(seconds: u64) -> Self {
+		use std::io::IsTerminal;
+		Self {
+			deadline: std::time::Instant::now() + std::time::Duration::from_secs(seconds),
+			shown: false,
+			enabled: std::io::stderr().is_terminal(),
+		}
+	}
+
+	pub fn enabled(&self) -> bool {
+		self.enabled
+	}
+
+	pub fn show(&mut self) {
+		if !self.enabled {
+			return;
+		}
+		self.shown = true;
+		// Rounded up, so it starts at the full window and reads 0s only once
+		// the offer has actually run out.
+		let left = self
+			.deadline
+			.saturating_duration_since(std::time::Instant::now());
+		let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+		eprint!("\r\x1b[Kexpires in {}", duration(secs));
+	}
+
+	/// Clears the line, so whatever is printed next starts clean.
+	pub fn done(&mut self) {
+		if self.enabled && self.shown {
+			eprint!("\r\x1b[K");
+		}
+	}
+}
+
 /// One line per incoming offer, for the selector.
 pub fn incoming_line(offer: &IncomingOffer) -> String {
 	format!(
@@ -150,6 +204,15 @@ mod tests {
 		assert_eq!(duration(45), "45s");
 		assert_eq!(duration(570), "9m 30s");
 		assert_eq!(duration(7500), "2h 5m");
+	}
+
+	#[test]
+	fn elapsed_keeps_tenths_under_a_minute() {
+		use std::time::Duration;
+		assert_eq!(elapsed(Duration::from_millis(40)), "40ms");
+		assert_eq!(elapsed(Duration::from_millis(3240)), "3.2s");
+		assert_eq!(elapsed(Duration::from_millis(59_900)), "59.9s");
+		assert_eq!(elapsed(Duration::from_secs(95)), "1m 35s");
 	}
 
 	#[test]
