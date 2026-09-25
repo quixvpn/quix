@@ -5,6 +5,8 @@ use proto::{PeerStatus, Request, Response, Traffic};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::authz::{self, Caller};
+use crate::files::respond;
+use proto::frame::FrameReader;
 use crate::state::State;
 
 #[cfg(windows)]
@@ -89,6 +91,17 @@ async fn handle(conn: Stream, state: State) -> Result<()> {
 	// The kernel tells us who is connected; the client never gets to claim it.
 	let caller = Caller::of(&conn);
 	let resp = match authz::check(&req, &caller, &state.operator().await) {
+		Ok(()) if is_transfer(&req) => {
+			// A client speaks again only once answered, so nothing past the
+			// request line can be buffered yet. If something is, it is not a
+			// client following the protocol, and its bytes are not ours to
+			// guess at.
+			if !recver.buffer().is_empty() {
+				anyhow::bail!("client sent data before the request was answered");
+			}
+			drop(recver);
+			return transfer(req, conn, &state).await;
+		}
 		Ok(()) => dispatch(req, &state).await,
 		Err(message) => {
 			crate::warn!("refused {req:?} from {}", caller.describe());
@@ -104,6 +117,34 @@ async fn handle(conn: Stream, state: State) -> Result<()> {
 	sender.write_all(&payload).await?;
 
 	Ok(())
+}
+
+/// Requests that go on past their answer, with file contents as frames.
+fn is_transfer(req: &Request) -> bool {
+	matches!(req, Request::FileSend { .. } | Request::FileAccept { .. })
+}
+
+/// Runs a file transfer over the rest of the connection. The connection is
+/// split so each direction can be watched while the other is in use: a CLI
+/// that hangs up mid-transfer is a cancellation, and has to be noticed as one.
+async fn transfer(req: Request, conn: Stream, state: &State) -> Result<()> {
+	let (recv, mut send) = conn.split();
+	let cli = FrameReader::spawn(recv);
+	let files = state.files();
+
+	match req {
+		Request::FileSend {
+			name,
+			size,
+			target,
+			ttl_secs,
+		} => match state.find_peer(&target).await {
+			Ok((peer, _)) => files.send(peer, name, size, ttl_secs, cli, &mut send).await,
+			Err(message) => respond(&mut send, &Response::Error { message }).await,
+		},
+		Request::FileAccept { id } => files.accept(&id, cli, &mut send).await,
+		_ => unreachable!("only transfers are routed here"),
+	}
 }
 
 async fn dispatch(req: Request, state: &State) -> Response {
@@ -203,6 +244,15 @@ async fn dispatch(req: Request, state: &State) -> Response {
 		},
 
 		Request::Kick { peer } => kick(state, &peer).await,
+
+		Request::FileList => {
+			let (incoming, outgoing) = state.files().list();
+			Response::Files { incoming, outgoing }
+		}
+		Request::FileReject { id } => state.files().reject(&id).await,
+		Request::FileSend { .. } | Request::FileAccept { .. } => Response::Error {
+			message: "a transfer cannot be dispatched as a single request".to_string(),
+		},
 
 		Request::SetOperator { user } => match authz::resolve_user(&user) {
 			Ok(uid) => match state.set_operator(user.clone(), uid).await {

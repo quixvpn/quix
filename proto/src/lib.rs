@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub mod filename;
+pub mod frame;
+
 /// The version these binaries were built from, resolved by `build.rs`: the git
 /// tag in CI, `git describe` locally, `Cargo.toml` as a last resort. Carries no
 /// leading `v` — display code adds it.
@@ -28,6 +31,27 @@ pub const DEFAULT_INVITE_TTL: u64 = 5 * 60;
 /// conversation it was shared in is the problem expiry exists to solve.
 pub const MAX_INVITE_TTL: u64 = 30 * 24 * 60 * 60;
 
+/// How long a file offer waits for an answer when `--expires` is not given.
+pub const DEFAULT_FILE_TTL: u64 = 10 * 60;
+
+/// The longest a file offer may wait, enforced by both daemons whatever the
+/// client asks for. The sender's CLI is held open for the whole window, so a
+/// longer one would only mean a terminal left waiting for days.
+pub const MAX_FILE_TTL: u64 = 24 * 60 * 60;
+
+/// How many offers one peer may have waiting on this node at once. Offers cost
+/// no disk, but each holds a connection open and a line in `quix file list`.
+pub const MAX_PENDING_PER_PEER: usize = 20;
+
+/// Every command the CLI can send the daemon.
+///
+/// **Invariant: the daemon never opens, reads, writes, lists or stats a
+/// filesystem path supplied by a caller.** No variant may carry a path the
+/// daemon acts on. The daemon runs as root or SYSTEM and the caller does not,
+/// so a path here would let any caller reach files through the daemon that the
+/// operating system would refuse them directly. File contents cross the socket
+/// only as [`frame`]s, read and written by the CLI with the caller's own
+/// permissions; `FileSend::name` is a label for the receiver, never opened.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum Request {
@@ -49,10 +73,114 @@ pub enum Request {
 	/// `status` shows for it: hostname, fallback, either under the zone, or the
 	/// full endpoint id.
 	Kick { peer: String },
+	/// Offer a file to a peer, then stream it once they accept.
+	///
+	/// Answered with `FileOffered` once the peer has the offer, after which the
+	/// connection switches to frames: the daemon sends [`FileEvent`]s as control
+	/// frames, and on `Accepted` the CLI streams data, the hash and an end frame.
+	FileSend {
+		/// The bare file name the receiver will see. A label only: the daemon
+		/// checks it is a single component and never touches a file by it.
+		name: String,
+		size: u64,
+		/// The peer, as `status` shows it, or its overlay address.
+		target: String,
+		#[serde(default = "default_file_ttl")]
+		ttl_secs: u64,
+	},
+	/// Offers waiting here, and the state of this node's own.
+	FileList,
+	/// Take an offer and stream it to the caller.
+	///
+	/// Answered with `FileIncoming`, then data frames, the sender's hash and an
+	/// end frame. The CLI answers with an end frame once the file is in place —
+	/// the commit — or an error frame if it could not keep it.
+	FileAccept { id: String },
+	FileReject { id: String },
 }
 
 fn default_invite_ttl() -> u64 {
 	DEFAULT_INVITE_TTL
+}
+
+fn default_file_ttl() -> u64 {
+	DEFAULT_FILE_TTL
+}
+
+/// What the daemon tells a sending CLI while it waits, as control frames.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum FileEvent {
+	/// The receiver accepted: stream the file now.
+	Accepted,
+	Rejected,
+	/// Nobody answered within the offer's window.
+	Expired,
+	/// The receiver has the file in place and verified.
+	Delivered,
+}
+
+/// Where an offer stands. Offers this node made move through all of these;
+/// offers made to it are only ever listed while `Offered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OfferState {
+	Offered,
+	Transferring,
+	Done,
+	Rejected,
+	Expired,
+	/// The sender withdrew it.
+	Cancelled,
+	Failed,
+}
+
+impl OfferState {
+	pub fn label(self) -> &'static str {
+		match self {
+			OfferState::Offered => "offered",
+			OfferState::Transferring => "transferring",
+			OfferState::Done => "done",
+			OfferState::Rejected => "rejected",
+			OfferState::Expired => "expired",
+			OfferState::Cancelled => "cancelled",
+			OfferState::Failed => "failed",
+		}
+	}
+
+	pub fn is_finished(self) -> bool {
+		!matches!(self, OfferState::Offered | OfferState::Transferring)
+	}
+}
+
+/// An offer waiting on this node for an answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncomingOffer {
+	/// This node's id for it, which is what `accept` and `reject` take.
+	pub id: String,
+	/// The sender's hostname, or its fallback identifier.
+	pub from: String,
+	pub name: String,
+	pub size: u64,
+	/// Seconds until it lapses, counted by this daemon so the two clocks never
+	/// have to agree.
+	pub expires_in_secs: u64,
+}
+
+/// An offer this node made, in whatever state it has reached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutgoingOffer {
+	pub id: String,
+	pub to: String,
+	pub name: String,
+	pub size: u64,
+	pub state: OfferState,
+	/// Only while it is still waiting for an answer.
+	#[serde(default)]
+	pub expires_in_secs: Option<u64>,
+	/// Why it failed, when it did.
+	#[serde(default)]
+	pub detail: Option<String>,
 }
 
 /// One peer in the network, as seen from this node.
@@ -178,6 +306,12 @@ pub enum Response {
 	/// A peer was removed. `notified` is whether it was told, as opposed to
 	/// finding out when the links it tries are refused.
 	Kicked { name: String, id: String, notified: bool },
+	/// The peer has the offer and the sending CLI should wait for an answer.
+	FileOffered { id: String, to: String, expires_in_secs: u64 },
+	/// An accepted offer, about to arrive as frames.
+	FileIncoming { id: String, from: String, name: String, size: u64 },
+	Files { incoming: Vec<IncomingOffer>, outgoing: Vec<OutgoingOffer> },
+	FileRejected { id: String, name: String, from: String },
 	/// The caller may not run this command as who they are. Distinct from
 	/// `Error` so a client can react to it — on Windows the CLI retries the
 	/// command elevated rather than making the user work out why it failed.

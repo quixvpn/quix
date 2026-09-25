@@ -42,59 +42,14 @@ pub async fn run(args: InviteArgs) -> Result<()> {
 	}
 }
 
-/// Turns `30 min` into seconds.
-///
-/// Both spellings of each unit are taken: someone typing `--expires 1 days` or
-/// `--expires 30 minutes` means the obvious thing, and refusing it would be
-/// pedantry rather than safety.
+/// Turns `30 min` into seconds, within what an invite may last.
 fn parse_expiry(amount: &str, unit: &str) -> Result<u64, String> {
-	let amount: u64 = amount
-		.parse()
-		.map_err(|_| format!("{amount:?} is not a whole number of {unit}"))?;
-
-	if amount == 0 {
-		return Err("an invite that expires immediately cannot be redeemed".to_string());
-	}
-
-	let per_unit = match unit.to_ascii_lowercase().as_str() {
-		"min" | "mins" | "minute" | "minutes" => 60,
-		"hour" | "hours" | "hr" | "hrs" => 60 * 60,
-		"day" | "days" => 24 * 60 * 60,
-		other => return Err(format!("unknown unit {other:?} — use min, hours or days")),
-	};
-
-	// Checked, or a large enough amount wraps into a short window — the one
-	// arithmetic mistake here that would weaken rather than break things.
-	let seconds = amount
-		.checked_mul(per_unit)
-		.filter(|s| *s <= MAX_INVITE_TTL)
-		.ok_or_else(|| {
-			format!(
-				"the longest an invite may last is {} days",
-				MAX_INVITE_TTL / (24 * 60 * 60)
-			)
-		})?;
-
-	Ok(seconds)
+	super::expiry::parse(amount, unit, MAX_INVITE_TTL, "an invite")
 }
 
 /// The window in the words it was asked for, rather than a pile of seconds.
 fn describe(seconds: u64) -> String {
-	const MINUTE: u64 = 60;
-	const HOUR: u64 = 60 * MINUTE;
-	const DAY: u64 = 24 * HOUR;
-
-	let (count, unit) = match seconds {
-		s if s % DAY == 0 && s >= DAY => (s / DAY, "day"),
-		s if s % HOUR == 0 && s >= HOUR => (s / HOUR, "hour"),
-		s if s % MINUTE == 0 && s >= MINUTE => (s / MINUTE, "minute"),
-		s => (s, "second"),
-	};
-
-	match count {
-		1 => format!("in 1 {unit}"),
-		n => format!("in {n} {unit}s"),
-	}
+	format!("in {}", super::expiry::span(seconds))
 }
 
 #[cfg(test)]

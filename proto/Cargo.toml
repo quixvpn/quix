@@ -5,3 +5,11 @@ edition = "2021"
 
 [dependencies]
 serde.workspace = true
+# Control frames carry JSON, like the request line before them.
+serde_json.workspace = true
+# The frame codec is written against tokio's async I/O traits, which both the
+# local socket and iroh's QUIC streams implement.
+tokio = { workspace = true, features = ["io-util", "rt", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }

@@ -3,6 +3,7 @@ mod args;
 mod authz;
 mod connect;
 mod dns;
+mod files;
 mod handler;
 mod identity;
 mod ipc;
@@ -172,6 +173,14 @@ pub async fn run(shutdown: impl Future<Output = ()>) -> Result<()> {
 			ADMIN_ALPN,
 			AdminHandler {
 				state: state.clone(),
+			},
+		)
+		// Its own connections, never the data plane's: a transfer shares no
+		// flow control with VPN traffic and cannot stall it.
+		.accept(
+			files::FILE_ALPN,
+			files::FileHandler {
+				files: state.files().clone(),
 			},
 		)
 		.spawn();
